@@ -58,13 +58,25 @@ struct ContentView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            mainColumn
-                .frame(minWidth: 440, maxWidth: .infinity)
-            if state.showPlan {
-                Divider()
-                planPane
-                    .frame(width: 280)
+        Group {
+            if state.mode == .day {
+                HStack(spacing: 0) {
+                    mainColumn
+                        .frame(minWidth: 440, maxWidth: .infinity)
+                    if state.showPlan {
+                        Divider()
+                        planPane
+                            .frame(width: 280)
+                    }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    NotesView()
+                    statusArea
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 14)
+                }
+                .background(Theme.canvas)
             }
         }
         .frame(minWidth: 720, minHeight: 520)
@@ -78,6 +90,7 @@ struct ContentView: View {
             DispatchQueue.main.async { focus = .add }
         }
         .onChange(of: state.focusToken) { _, _ in
+            state.mode = .day
             focus = state.focusRequest
         }
         .onChange(of: customTime) { _, on in
@@ -107,28 +120,38 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button { state.goPrev() } label: {
-                Label("Предыдущий день", systemImage: "chevron.left")
+        ToolbarItem(placement: .principal) {
+            Picker("Режим", selection: $state.mode) {
+                Text("День").tag(AppMode.day)
+                Text("Заметки").tag(AppMode.notes)
             }
-            .help("Предыдущий день (⌘[)")
-            Button { state.goNext() } label: {
-                Label("Следующий день", systemImage: "chevron.right")
-            }
-            .help("Следующий день (⌘])")
-            Button("Сегодня") { state.goToday() }
-                .help("Перейти к сегодняшнему дню (⌘T)")
-            DatePicker("День", selection: Binding(get: { state.selectedDay }, set: { state.go(to: $0) }),
-                       displayedComponents: .date)
-                .labelsHidden()
-                .datePickerStyle(.compact)
-                .help("Выбрать день")
+            .pickerStyle(.segmented)
+            .frame(width: 170)
         }
-        ToolbarItem(placement: .primaryAction) {
-            Button { state.showPlan.toggle() } label: {
-                Label(state.showPlan ? String("Скрыть план") : String("Показать план"), systemImage: "sidebar.right")
+        if state.mode == .day {
+            ToolbarItemGroup(placement: .navigation) {
+                Button { state.goPrev() } label: {
+                    Label("Предыдущий день", systemImage: "chevron.left")
+                }
+                .help("Предыдущий день (⌘[)")
+                Button { state.goNext() } label: {
+                    Label("Следующий день", systemImage: "chevron.right")
+                }
+                .help("Следующий день (⌘])")
+                Button("Сегодня") { state.goToday() }
+                    .help("Перейти к сегодняшнему дню (⌘T)")
+                DatePicker("День", selection: Binding(get: { state.selectedDay }, set: { state.go(to: $0) }),
+                           displayedComponents: .date)
+                    .labelsHidden()
+                    .datePickerStyle(.compact)
+                    .help("Выбрать день")
             }
-            .help("План на день (⌥⌘P)")
+            ToolbarItem(placement: .primaryAction) {
+                Button { state.showPlan.toggle() } label: {
+                    Label(state.showPlan ? String("Скрыть план") : String("Показать план"), systemImage: "sidebar.right")
+                }
+                .help("План на день (⌥⌘P)")
+            }
         }
     }
 
@@ -664,6 +687,299 @@ struct ContentView: View {
         if state.addPlan(text: t) {
             planDraft = ""
             focus = .plan
+        }
+    }
+}
+
+// MARK: - Notes
+
+extension Notification.Name {
+    /// Отдельный сигнал нужен и при повторном вызове команды с уже пустым выбором.
+    static let daylogNewNote = Notification.Name("Daylog.newNote")
+}
+
+struct NotesView: View {
+    @EnvironmentObject var state: AppState
+    @State private var newNoteToken = UUID()
+    @FocusState private var searchFocused: Bool
+
+    private var isSearching: Bool {
+        !state.noteSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var notes: [DiaryNote] {
+        isSearching ? state.noteSearchResults : state.sortedNotes
+    }
+
+    private var selectedNote: DiaryNote? {
+        state.sortedNotes.first { $0.id == state.selectedNoteID }
+    }
+
+    var body: some View {
+        HSplitView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Заметки")
+                    .font(.headline)
+                    .foregroundStyle(Theme.ink)
+                    .accessibilityAddTraits(.isHeader)
+                searchField
+                Button(action: newNote) {
+                    Label("Новая заметка", systemImage: "plus")
+                }
+                .disabled(state.isBlocked)
+                if notes.isEmpty {
+                    Text(isSearching ? "Ничего не найдено." : "Идеи и мысли можно записать здесь — без привязки ко дню.")
+                        .font(.callout)
+                        .foregroundStyle(Theme.quiet)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                } else {
+                    List(selection: $state.selectedNoteID) {
+                        ForEach(notes) { note in
+                            NoteRow(note: note)
+                                .tag(note.id)
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    .scrollContentBackground(.hidden)
+                }
+            }
+            .padding(16)
+            .frame(minWidth: 240, idealWidth: 280, maxWidth: 340, maxHeight: .infinity, alignment: .top)
+            .background(Theme.pane)
+
+            NoteEditor(state: state, note: selectedNote)
+                .id(state.selectedNoteID?.uuidString ?? newNoteToken.uuidString)
+                .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .daylogNewNote)) { notification in
+            guard let source = notification.object as? AppState, source === state else { return }
+            newNote()
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(Theme.quiet)
+            TextField("Поиск по заметкам", text: $state.noteSearchText)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onExitCommand { state.noteSearchText = "" }
+                .accessibilityLabel("Поиск по заметкам")
+            if isSearching {
+                Button { state.noteSearchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.quiet)
+                .accessibilityLabel("Сбросить поиск")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.field))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .strokeBorder(searchFocused ? Theme.accent : Theme.rail, lineWidth: searchFocused ? 1.5 : 1))
+    }
+
+    private func newNote() {
+        state.selectedNoteID = nil
+        state.noteSearchText = ""
+        newNoteToken = UUID()
+    }
+}
+
+struct NoteRow: View {
+    let note: DiaryNote
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без заголовка" : note.title)
+                    .font(.headline)
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                if note.pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(Theme.accent)
+                        .accessibilityLabel("Закреплена")
+                }
+            }
+            Text(note.body.components(separatedBy: .newlines).first ?? "")
+                .font(.callout)
+                .foregroundStyle(Theme.quiet)
+                .lineLimit(1)
+            Text(DiaryFormat.shortDate(note.updatedAt))
+                .font(.caption)
+                .foregroundStyle(Theme.quiet)
+        }
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct NoteEditor: View {
+    @ObservedObject var state: AppState
+    let note: DiaryNote?
+    @State private var title: String
+    @State private var text: String
+    @State private var beforePolish: (title: String, body: String)?
+    @State private var polishBusy = false
+    @State private var polishTask: Task<Void, Never>?
+    @State private var confirmDelete = false
+    @State private var didSave = false
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable { case title, body }
+
+    init(state: AppState, note: DiaryNote?) {
+        self.state = state
+        self.note = note
+        _title = State(initialValue: note?.title ?? "")
+        _text = State(initialValue: note?.body ?? "")
+    }
+
+    private var isBlank: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    private var polishDraft: String {
+        [title, text].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("Заголовок", text: $title)
+                .textFieldStyle(.plain)
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(Theme.ink)
+                .focused($focus, equals: .title)
+                .accessibilityLabel("Заголовок заметки")
+                .disabled(polishBusy || state.isBlocked)
+
+            Text("Текст заметки")
+                .font(.caption)
+                .foregroundStyle(Theme.quiet)
+            TextEditor(text: $text)
+                .font(.body)
+                .foregroundStyle(Theme.ink)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(focus == .body ? Theme.accent : Theme.rail, lineWidth: focus == .body ? 1.5 : 1))
+                .focused($focus, equals: .body)
+                .accessibilityLabel("Текст заметки")
+                .disabled(polishBusy || state.isBlocked)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { polishControls }
+                VStack(alignment: .leading, spacing: 8) { polishControls }
+            }
+            HStack(spacing: 12) {
+                if let note {
+                    Button(note.pinned ? "Открепить" : "Закрепить") {
+                        state.setNotePinned(note, !note.pinned)
+                    }
+                    Button("Удалить", role: .destructive) { confirmDelete = true }
+                }
+                Spacer(minLength: 0)
+                Button("Сохранить", action: save)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .disabled(isBlank)
+            }
+            .disabled(polishBusy || state.isBlocked)
+        }
+        .padding(24)
+        .background(Theme.canvas)
+        .onAppear { focus = .title }
+        .onDisappear { polishTask?.cancel(); persistIfNeeded() }
+        .confirmationDialog("Удалить заметку?", isPresented: $confirmDelete) {
+            Button("Удалить", role: .destructive, action: delete)
+            Button("Отмена", role: .cancel) { }
+        } message: {
+            Text("Сразу после удаления заметку можно вернуть.")
+        }
+    }
+
+    @ViewBuilder
+    private var polishControls: some View {
+        HStack(spacing: 8) {
+            Button("Оформить", action: beginPolish)
+                .disabled(polishDraft.isEmpty || polishBusy || state.isBlocked)
+            if polishBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Оформляю заметку")
+            }
+        }
+        if beforePolish != nil {
+            Button("Отменить оформление") {
+                guard let previous = beforePolish else { return }
+                title = previous.title
+                text = previous.body
+                beforePolish = nil
+            }
+            .disabled(polishBusy || state.isBlocked)
+        }
+    }
+
+    private func beginPolish() {
+        guard !polishBusy, !state.isBlocked, !polishDraft.isEmpty else { return }
+        let previous = (title: title, body: text)
+        let draft = polishDraft
+        polishBusy = true
+        polishTask = Task {
+            let result = await state.polishNote(draft: draft)
+            guard !Task.isCancelled else { return }
+            polishBusy = false
+            polishTask = nil
+            if let result {
+                beforePolish = previous
+                title = result.title
+                text = result.body
+                focus = .body
+                state.showDraftStatus("Заметка оформлена. Нажмите «Сохранить», чтобы записать изменения.")
+            }
+        }
+    }
+
+    private func save() {
+        guard !isBlank, !polishBusy, !state.isBlocked else { return }
+        if let note {
+            didSave = state.updateNote(id: note.id, title: title, body: text)
+        } else {
+            let previousIDs = Set(state.sortedNotes.map(\.id))
+            if state.addNote(title: title, body: text) {
+                didSave = true
+                state.selectedNoteID = state.sortedNotes.first { !previousIDs.contains($0.id) }?.id
+            }
+        }
+    }
+
+    /// Автосохранение при уходе из редактора, чтобы несохранённый набросок/правки не терялись
+    /// при переключении заметки или режима. После явного «Сохранить» (didSave) — пропускаем, без дублей.
+    private func persistIfNeeded() {
+        guard !didSave, !state.isBlocked else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let note {
+            if title != note.title || text != note.body {
+                _ = state.updateNote(id: note.id, title: title, body: text)
+            }
+        } else {
+            _ = state.addNote(title: title, body: text)
+        }
+    }
+
+    private func delete() {
+        guard let note, !polishBusy, !state.isBlocked else { return }
+        state.deleteNote(note)
+        if !state.sortedNotes.contains(where: { $0.id == note.id }) {
+            state.selectedNoteID = nil
         }
     }
 }

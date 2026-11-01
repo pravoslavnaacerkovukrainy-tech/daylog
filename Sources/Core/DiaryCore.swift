@@ -52,6 +52,28 @@ public struct DayPlan: Codable, Identifiable, Equatable, Hashable {
     }
 }
 
+/// Заметка вне времени: сумбурный набросок, оформленный в заголовок + текст.
+/// Не привязана к дню. Живёт, пока не удалят.
+public struct DiaryNote: Codable, Identifiable, Equatable, Hashable {
+    public var id: UUID
+    public var title: String
+    public var body: String
+    public var createdAt: Date
+    public var updatedAt: Date
+    /// Закреплённые показываются выше остальных.
+    public var pinned: Bool
+
+    public init(id: UUID = UUID(), title: String, body: String,
+                createdAt: Date, updatedAt: Date, pinned: Bool = false) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.pinned = pinned
+    }
+}
+
 /// Ключ календарного дня без часовых поясов в файле: «2030-03-10».
 public enum DiaryDay {
     public static func key(_ date: Date, calendar: Calendar = .current) -> String {
@@ -67,29 +89,33 @@ public enum DiaryDay {
 }
 
 /// Версионированный документ: и файл хранилища, и файл экспорта JSON.
-/// Версия 1 — только записи. Версия 2 — записи + планы и связи.
-/// Файл без планов и связей по-прежнему пишется как версия 1 (его читает и прежняя сборка).
+/// Версия 1 — только записи. Версия 2 — записи + планы и связи. Версия 3 — + заметки.
+/// Файл без планов пишется как v1, с планами без заметок — v2 (его читает и прежняя сборка);
+/// как только появляются заметки — v3.
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var format: String
     public var version: Int
     public var exportedAt: Date?
     public var entries: [DiaryEntry]
     public var plans: [DayPlan]
+    public var notes: [DiaryNote]
 
-    public init(entries: [DiaryEntry], plans: [DayPlan] = [], exportedAt: Date? = nil) {
+    public init(entries: [DiaryEntry], plans: [DayPlan] = [], notes: [DiaryNote] = [], exportedAt: Date? = nil) {
         self.format = DiaryDocument.formatName
         self.exportedAt = exportedAt
         self.entries = entries
         self.plans = plans
+        self.notes = notes
         let needsV2 = !plans.isEmpty || entries.contains { $0.planID != nil }
-        self.version = needsV2 ? 2 : 1
+        let needsV3 = !notes.isEmpty
+        self.version = needsV3 ? 3 : (needsV2 ? 2 : 1)
     }
 
     enum CodingKeys: String, CodingKey {
-        case format, version, exportedAt, entries, plans
+        case format, version, exportedAt, entries, plans, notes
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +125,7 @@ public struct DiaryDocument: Codable {
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
         entries = try c.decode([DiaryEntry].self, forKey: .entries)
         plans = try c.decodeIfPresent([DayPlan].self, forKey: .plans) ?? []
+        notes = try c.decodeIfPresent([DiaryNote].self, forKey: .notes) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -108,6 +135,7 @@ public struct DiaryDocument: Codable {
         try c.encodeIfPresent(exportedAt, forKey: .exportedAt)
         try c.encode(entries, forKey: .entries)
         if !plans.isEmpty { try c.encode(plans, forKey: .plans) }
+        if !notes.isEmpty { try c.encode(notes, forKey: .notes) }
     }
 }
 
@@ -255,6 +283,7 @@ public final class DiaryStore {
     public var fileURL: URL { directory.appendingPathComponent(DiaryStore.fileName) }
     public private(set) var entries: [DiaryEntry] = []
     public private(set) var plans: [DayPlan] = []
+    public private(set) var notes: [DiaryNote] = []
     public private(set) var blockReason: String?
     public var isBlocked: Bool { blockReason != nil }
 
@@ -280,6 +309,7 @@ public final class DiaryStore {
         guard fm.fileExists(atPath: fileURL.path) else {
             entries = []
             plans = []
+            notes = []
             return
         }
         do {
@@ -292,22 +322,25 @@ public final class DiaryStore {
             let doc = try DiaryJSON.decode(data)
             entries = DiaryStore.sorted(doc.entries)
             plans = DiaryStore.sortedPlans(doc.plans)
+            notes = DiaryStore.sortNotesCanonical(doc.notes)
         } catch {
             entries = []
             plans = []
+            notes = []
             let diaryError = (error as? DiaryError) ?? DiaryError.unreadable(error.localizedDescription)
             blockReason = (diaryError.errorDescription ?? "ошибка чтения") + " Файл: \(fileURL.path)"
             throw diaryError
         }
     }
 
-    /// Единственная точка записи: записи и планы пишутся одним атомарным файлом.
-    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan]) throws {
+    /// Единственная точка записи: записи, планы и заметки пишутся одним атомарным файлом.
+    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan], notes newNotes: [DiaryNote]) throws {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
         let sortedEntries = DiaryStore.sorted(newEntries)
         let sortedPlans = DiaryStore.sortedPlans(newPlans)
+        let sortedNotes = DiaryStore.sortNotesCanonical(newNotes)
         do {
-            let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: sortedEntries, plans: sortedPlans))
+            let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes))
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: fileURL, options: .atomic)
         } catch {
@@ -315,6 +348,12 @@ public final class DiaryStore {
         }
         entries = sortedEntries
         plans = sortedPlans
+        notes = sortedNotes
+    }
+
+    /// Перегрузка для записей/планов: заметки не меняются.
+    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan]) throws {
+        try persist(entries: newEntries, plans: newPlans, notes: notes)
     }
 
     static func sorted(_ list: [DiaryEntry]) -> [DiaryEntry] {
@@ -328,6 +367,14 @@ public final class DiaryStore {
     static func sortedPlans(_ list: [DayPlan]) -> [DayPlan] {
         list.sorted { a, b in
             if a.day != b.day { return a.day < b.day }
+            if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    /// Каноничный порядок заметок в файле: по времени создания, добор по id.
+    static func sortNotesCanonical(_ list: [DiaryNote]) -> [DiaryNote] {
+        list.sorted { a, b in
             if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
             return a.id.uuidString < b.id.uuidString
         }
@@ -548,11 +595,102 @@ public final class DiaryStore {
         return outcome
     }
 
+    // MARK: Notes
+
+    static func cleanTitle(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Тело заметки для Markdown-экспорта: нейтрализуем структуру, чтобы одна заметка
+    /// не ломала документ. Экранируем строки-заголовки (#…) и закрываем незакрытые ограды кода.
+    static func escapeMarkdownBody(_ body: String) -> String {
+        var lines = body.components(separatedBy: "\n")
+        var fences = 0
+        for i in lines.indices {
+            let lead = lines[i].drop(while: { $0 == " " })
+            if lead.hasPrefix("#"), let idx = lines[i].firstIndex(of: "#") {
+                lines[i].insert("\\", at: idx)
+            }
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") { fences += 1 }
+        }
+        var out = lines.joined(separator: "\n")
+        if fences % 2 != 0 { out += "\n```" }
+        return out
+    }
+
+    /// Порядок для интерфейса: закреплённые сверху, внутри групп — по updatedAt вниз.
+    public func sortedNotes() -> [DiaryNote] {
+        notes.sorted { a, b in
+            if a.pinned != b.pinned { return a.pinned && !b.pinned }
+            if a.updatedAt != b.updatedAt { return a.updatedAt > b.updatedAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    @discardableResult
+    public func addNote(title: String, body: String, now: Date = Date()) throws -> DiaryNote {
+        let b = DiaryStore.cleanText(body)
+        guard !b.isEmpty else { throw DiaryError.emptyText }
+        let n = diaryNormalized(now)
+        let note = DiaryNote(title: DiaryStore.cleanTitle(title), body: b, createdAt: n, updatedAt: n)
+        try persist(entries: entries, plans: plans, notes: notes + [note])
+        return note
+    }
+
+    @discardableResult
+    public func updateNote(id: UUID, title: String, body: String, now: Date = Date()) throws -> DiaryNote {
+        let b = DiaryStore.cleanText(body)
+        guard !b.isEmpty else { throw DiaryError.emptyText }
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        var copy = notes
+        copy[idx].title = DiaryStore.cleanTitle(title)
+        copy[idx].body = b
+        copy[idx].updatedAt = diaryNormalized(now)
+        let updated = copy[idx]
+        try persist(entries: entries, plans: plans, notes: copy)
+        return updated
+    }
+
+    /// Закрепить/открепить. Не меняет updatedAt, чтобы закрепление не перетасовывало список по дате.
+    @discardableResult
+    public func setPinned(id: UUID, _ pinned: Bool) throws -> DiaryNote {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        var copy = notes
+        copy[idx].pinned = pinned
+        let updated = copy[idx]
+        try persist(entries: entries, plans: plans, notes: copy)
+        return updated
+    }
+
+    @discardableResult
+    public func deleteNote(id: UUID) throws -> DiaryNote {
+        guard let note = notes.first(where: { $0.id == id }) else { throw DiaryError.notFound }
+        try persist(entries: entries, plans: plans, notes: notes.filter { $0.id != id })
+        return note
+    }
+
+    /// Возврат только что удалённой заметки («Вернуть»).
+    public func restoreNote(_ note: DiaryNote) throws {
+        guard !notes.contains(where: { $0.id == note.id }) else { return }
+        try persist(entries: entries, plans: plans, notes: notes + [note])
+    }
+
+    /// Поиск по заголовку и телу, без учёта регистра и диакритики; порядок — как в интерфейсе.
+    public func searchNotes(_ query: String) -> [DiaryNote] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        let opts: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        return sortedNotes().filter { n in
+            n.title.range(of: q, options: opts, locale: DiaryFormat.ru) != nil
+                || n.body.range(of: q, options: opts, locale: DiaryFormat.ru) != nil
+        }
+    }
+
     // MARK: Export
 
     public func exportJSON(now: Date = Date()) throws -> Data {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
-        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, exportedAt: diaryNormalized(now)))
+        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now)))
     }
 
     public static func parseExport(_ data: Data) throws -> [DiaryEntry] {
@@ -568,6 +706,7 @@ public final class DiaryStore {
         var out = "# Ход дня — экспорт\n\n"
         out += "Экспортировано: \(DiaryFormat.stamp(now)). Записей: \(entries.count). "
         if !plans.isEmpty { out += "Пунктов плана: \(plans.count). " }
+        if !notes.isEmpty { out += "Заметок: \(notes.count). " }
         out += "Дни идут по порядку, внутри дня — по времени, от ранних к поздним.\n"
         let entryGroups = Dictionary(grouping: entries) { DiaryDay.key($0.timestamp, calendar: calendar) }
         let planGroups = Dictionary(grouping: plans) { $0.day }
@@ -595,6 +734,14 @@ public final class DiaryStore {
                 if let c = e.context {
                     out += "  - На чём остановился: \(c.replacingOccurrences(of: "\n", with: "\n    "))\n"
                 }
+            }
+        }
+        if !notes.isEmpty {
+            out += "\n## Заметки\n"
+            for n in sortedNotes() {
+                let rawTitle = n.title.isEmpty ? "Без заголовка" : n.title
+                let title = rawTitle.replacingOccurrences(of: "\n", with: " ")
+                out += "\n### \(title)\(n.pinned ? " 📌" : "")\n\n\(DiaryStore.escapeMarkdownBody(n.body))\n"
             }
         }
         return out

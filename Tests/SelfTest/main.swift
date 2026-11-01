@@ -505,5 +505,145 @@ test("Причёсывание: запасные формы ответа и ош
     check(DraftPolish.errorMessage(from: err) == "Incorrect API key", "текст ошибки API")
 }
 
+// MARK: Заметки — модель и документ v3
+
+test("Документ: версия 3 только при наличии заметок") {
+    let note = DiaryNote(title: "T", body: "B", createdAt: Date(), updatedAt: Date())
+    check(DiaryDocument(entries: [], plans: [], notes: [note]).version == 3, "с заметкой → v3")
+    check(DiaryDocument(entries: [], plans: []).version == 1, "без ничего → v1")
+}
+test("Документ: round-trip записей, планов и заметок") {
+    let note = DiaryNote(title: "Загол", body: "Тело\nвторая строка", createdAt: diaryNormalized(Date()), updatedAt: diaryNormalized(Date()), pinned: true)
+    let doc = DiaryDocument(entries: [], plans: [], notes: [note])
+    let data = try DiaryJSON.encoder().encode(doc)
+    let back = try DiaryJSON.decode(data)
+    check(back.notes == [note], "заметки совпали после round-trip")
+}
+test("Документ: encode без заметок не пишет ключ notes и даёт ≤ v2") {
+    let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: [], plans: []))
+    let s = String(data: data, encoding: .utf8)!
+    check(!s.contains("\"notes\""), "ключ notes отсутствует: \(s)")
+}
+test("Документ: v2-файл читается как notes=[]") {
+    let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
+    check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
+}
+test("Документ: будущая версия 4 отвергается как неподдерживаемая") {
+    let v4 = #"{"format":"daylog","version":4,"entries":[],"notes":[]}"#.data(using: .utf8)!
+    let err = expectError("v4 не поддерживается") { _ = try DiaryJSON.decode(v4) }
+    check((err as? DiaryError) == .unsupportedFormat("версия 4, приложение понимает версию до 3"), "сообщение про версию: \(String(describing: err))")
+}
+
+// MARK: Заметки — хранилище
+
+test("Заметки: add/update/delete/restore и пустое тело") {
+    let dir = freshDir("notes-crud"); let s = DiaryStore(directory: dir); try s.load()
+    let n = try s.addNote(title: "A", body: "текст")
+    check(s.notes.count == 1, "добавлена")
+    expectError("пустое тело") { _ = try s.addNote(title: "x", body: "   ") }
+    let u = try s.updateNote(id: n.id, title: "A2", body: "текст2")
+    check(u.title == "A2" && u.updatedAt >= n.updatedAt, "обновлена")
+    let d = try s.deleteNote(id: n.id); check(s.notes.isEmpty, "удалена")
+    try s.restoreNote(d); check(s.notes.count == 1, "восстановлена")
+    let s2 = DiaryStore(directory: dir); try s2.load()
+    check(s2.notes.count == 1, "сохранилось на диск")
+}
+test("Заметки: заголовок может быть пустым") {
+    let s = DiaryStore(directory: freshDir("notes-empty-title")); try s.load()
+    let n = try s.addNote(title: "   ", body: "есть тело")
+    check(n.title.isEmpty, "пустой заголовок допустим")
+}
+test("Заметки: порядок — закреплённые сверху, затем по updatedAt") {
+    let s = DiaryStore(directory: freshDir("notes-order")); try s.load()
+    let a = try s.addNote(title: "a", body: "1", now: Date(timeIntervalSince1970: 100))
+    let b = try s.addNote(title: "b", body: "2", now: Date(timeIntervalSince1970: 200))
+    _ = try s.setPinned(id: a.id, true)
+    let ids = s.sortedNotes().map { $0.id }
+    check(ids == [a.id, b.id], "закреплённая a впереди более новой b")
+    check(s.notes.first(where: { $0.id == a.id })!.updatedAt == a.updatedAt, "setPinned не трогает updatedAt")
+}
+test("Заметки: поиск по title и body, без учёта регистра") {
+    let s = DiaryStore(directory: freshDir("notes-search")); try s.load()
+    _ = try s.addNote(title: "Контакт техника", body: "позвонить")
+    _ = try s.addNote(title: "другое", body: "СЗІ отчёт")
+    check(s.searchNotes("техник").count == 1, "по заголовку")
+    check(s.searchNotes("сзі").count == 1, "по телу, регистр")
+}
+test("Заметки: мутация на заблокированном хранилище отвергается") {
+    let dir = freshDir("notes-blocked")
+    try Data("не json".utf8).write(to: dir.appendingPathComponent("entries.json"))
+    let s = DiaryStore(directory: dir); _ = try? s.load()
+    check(s.isBlocked, "хранилище заблокировано")
+    expectError("add на блоке") { _ = try s.addNote(title: "x", body: "y") }
+}
+
+// MARK: xAI — общий разбор ответа
+
+test("XAIResponses: извлечение текста и снятие ограды") {
+    let json = #"{"output":[{"type":"reasoning"},{"type":"message","content":[{"type":"output_text","text":"Привет"}]}]}"#.data(using: .utf8)!
+    check(try XAIResponses.extractText(json) == "Привет", "текст из message")
+    check(XAIResponses.stripCodeFence("```\nсодержимое\n```") == "содержимое", "ограда снята")
+    expectError("пустой output") { _ = try XAIResponses.extractText(#"{"output":[]}"#.data(using: .utf8)!) }
+}
+
+// MARK: NotePolish — набросок в заголовок и заметку
+
+test("NotePolish: лимит и пустой набросок") {
+    expectError("пустой") { _ = try NotePolish.requestBody(draft: "  ") }
+    expectError("длинный") { _ = try NotePolish.requestBody(draft: String(repeating: "а", count: 6001)) }
+}
+test("NotePolish: чистый JSON, JSON в ограде, мусор → фолбэк") {
+    let clean = #"{"output":[{"content":"{\"title\":\"Звонок\",\"body\":\"Позвонить технику про СЗІ\"}"}]}"#.data(using: .utf8)!
+    let r1 = try NotePolish.parse(clean)
+    check(r1.title == "Звонок" && r1.body.contains("технику"), "чистый JSON: \(r1)")
+    let fenced = #"{"output_text":"```json\n{\"title\":\"Т\",\"body\":\"Тело\"}\n```"}"#.data(using: .utf8)!
+    check(try NotePolish.parse(fenced).title == "Т", "JSON в ограде")
+    let garbage = #"{"output_text":"Первая строка\nвторая строка"}"#.data(using: .utf8)!
+    let r3 = try NotePolish.parse(garbage)
+    check(r3.title == "Первая строка" && r3.body.contains("вторая"), "фолбэк: title из первой строки, \(r3)")
+}
+
+// MARK: Заметки — экспорт
+
+test("Markdown: секция заметок, порядок, многострочное тело") {
+    let s = DiaryStore(directory: freshDir("md-notes")); try s.load()
+    let a = try s.addNote(title: "Первая", body: "строка1\nстрока2")
+    _ = try s.addNote(title: "Вторая", body: "x")
+    _ = try s.setPinned(id: a.id, true)
+    let md = try s.exportMarkdown()
+    check(md.contains("## Заметки"), "есть секция")
+    check(md.range(of: "Первая")!.lowerBound < md.range(of: "Вторая")!.lowerBound, "закреплённая выше")
+    check(md.contains("строка1") && md.contains("строка2"), "многострочное тело не потеряно")
+}
+test("Markdown: без заметок секции нет") {
+    let s = DiaryStore(directory: freshDir("md-none")); try s.load()
+    _ = try s.add(text: "запись", context: nil)
+    check(!(try s.exportMarkdown().contains("## Заметки")), "секции нет")
+}
+test("JSON-экспорт включает заметки") {
+    let s = DiaryStore(directory: freshDir("json-notes")); try s.load()
+    _ = try s.addNote(title: "Экс", body: "тело")
+    let doc = try DiaryStore.parseExportDocument(s.exportJSON())
+    check(doc.notes.count == 1 && doc.notes.first?.title == "Экс", "заметка в JSON-экспорте")
+}
+
+// MARK: Заметки — фиксы по код-ревью
+
+test("NotePolish: пустой результат после очистки — ошибка, не пустая заметка") {
+    let emptyFence = #"{"output_text":"```\n\n```"}"#.data(using: .utf8)!
+    expectError("пустая ограда → ошибка, а не («», «»)") { _ = try NotePolish.parse(emptyFence) }
+}
+
+test("Markdown: тело заметки не ломает структуру экспорта") {
+    let s = DiaryStore(directory: freshDir("md-escape")); try s.load()
+    _ = try s.addNote(title: "A", body: "```\nнезакрытая ограда")
+    _ = try s.addNote(title: "ЗаголовокB", body: "## строка-похожая-на-заголовок")
+    let md = try s.exportMarkdown()
+    check(md.contains("### A"), "заголовок заметки A на месте")
+    check(md.contains("### ЗаголовокB"), "заголовок заметки B не поглощён")
+    check(md.contains("\\## строка-похожая-на-заголовок"), "строка '##' в теле экранирована")
+    check(md.components(separatedBy: "```").count % 2 == 1, "ограды кода сбалансированы (нечётное число разделителей)")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)

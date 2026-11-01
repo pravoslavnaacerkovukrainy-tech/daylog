@@ -15,7 +15,7 @@ xcrun swiftc \
   -target "$TARGET" \
   -module-name DaylogSelfTest \
   -o build/daylog-selftest \
-  Sources/Core/DiaryCore.swift Sources/Core/DraftPolish.swift Tests/SelfTest/main.swift
+  Sources/Core/DiaryCore.swift Sources/Core/XAIResponses.swift Sources/Core/DraftPolish.swift Sources/Core/NotePolish.swift Tests/SelfTest/main.swift
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/daylog-test.XXXXXX")"
 cleanup() { chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"; }
