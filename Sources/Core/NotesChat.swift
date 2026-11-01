@@ -98,4 +98,82 @@ public enum NotesChat {
         req.httpBody = try requestBody(notes: notes, history: history, question: question)
         return req
     }
+
+    public static func parse(_ data: Data) throws -> (answer: String, sources: [Int]) {
+        let text = try XAIResponses.extractText(data)
+        let markerPattern = #"^[\t ]*(?:⟦[\t ]*источники[\t ]*:[^\r\n]*?⟧|\[[\t ]*источники[\t ]*:[^\r\n]*?\])[\t ]*$"#
+        let markerRegex = try NSRegularExpression(
+            pattern: markerPattern,
+            options: [.caseInsensitive, .anchorsMatchLines]
+        )
+        let fullRange = NSRange(text.startIndex..., in: text)
+        let matches = markerRegex.matches(in: text, range: fullRange)
+
+        guard let marker = matches.last, let markerRange = Range(marker.range, in: text) else {
+            return (text.trimmingCharacters(in: .whitespacesAndNewlines), [])
+        }
+
+        let markerLine = String(text[markerRange])
+        let sources: [Int]
+        if markerLine.lowercased().components(separatedBy: CharacterSet.letters.inverted).contains("нет") {
+            sources = []
+        } else {
+            let numberRegex = try NSRegularExpression(pattern: #"-?\d+"#)
+            let markerNSRange = NSRange(markerLine.startIndex..., in: markerLine)
+            sources = numberRegex.matches(in: markerLine, range: markerNSRange).compactMap { match in
+                guard let range = Range(match.range, in: markerLine) else { return nil }
+                return Int(markerLine[range])
+            }
+        }
+
+        var answer = text
+        answer.removeSubrange(markerRange)
+        answer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty else { throw DraftPolishError.badResponse }
+        return (answer, sources)
+    }
+
+    public static func resolveSources(_ numbers: [Int], noteCount: Int) -> [Int] {
+        var seen = Set<Int>()
+        return numbers.filter { number in
+            guard (1 ... noteCount).contains(number) else { return false }
+            return seen.insert(number).inserted
+        }
+    }
+}
+
+public struct NotesChatClient {
+    public var session: URLSession
+
+    public init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    public func ask(
+        notes: [DiaryNote],
+        history: [ChatMessage],
+        question: String,
+        apiKey: String
+    ) async throws -> (answer: String, sources: [Int]) {
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw DraftPolishError.noKey }
+        let req = try NotesChat.request(
+            notes: notes,
+            history: history,
+            question: question,
+            apiKey: trimmed
+        )
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        }
+        guard let http = response as? HTTPURLResponse else { throw DraftPolishError.badResponse }
+        guard (200 ... 299).contains(http.statusCode) else {
+            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data))
+        }
+        return try NotesChat.parse(data)
+    }
 }

@@ -671,5 +671,23 @@ test("NotesChat: переразмер контекста → contextTooLarge") {
     if case .contextTooLarge = (err as? DraftPolishError) {} else { check(false, "ожидался contextTooLarge: \(String(describing: err))") }
 }
 
+// MARK: Чат по заметкам — разбор ответа и источников
+
+test("NotesChat.parse: ответ + источники, 'нет', отсутствие строки, пустой") {
+    let withSrc = #"{"output_text":"Ответ про кран.\n⟦источники: 1, 3⟧"}"#.data(using: .utf8)!
+    let r = try NotesChat.parse(withSrc)
+    check(r.answer == "Ответ про кран." && r.sources == [1, 3], "ответ без строки, источники [1,3]: \(r)")
+    let none = #"{"output_text":"Не нашёл в заметках.\n⟦источники: нет⟧"}"#.data(using: .utf8)!
+    check(try NotesChat.parse(none).sources.isEmpty, "'нет' → пусто")
+    let noLine = #"{"output_text":"Просто ответ"}"#.data(using: .utf8)!
+    let r2 = try NotesChat.parse(noLine)
+    check(r2.sources.isEmpty && r2.answer == "Просто ответ", "нет строки → фолбэк")
+    expectError("пустой ответ") { _ = try NotesChat.parse(#"{"output_text":"⟦источники: 1⟧"}"#.data(using: .utf8)!) }
+}
+test("NotesChat.resolveSources: отбрасывает вне диапазона, дедуп, порядок") {
+    check(NotesChat.resolveSources([1, 3, 5, 3], noteCount: 3) == [1, 3], "5 вне, дубль 3 убран")
+    check(NotesChat.resolveSources([0, -1, 2], noteCount: 2) == [2], "0/отриц. отброшены")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
