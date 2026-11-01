@@ -56,6 +56,15 @@ struct DaylogCommands: Commands {
                 state.requestFocus(.plan)
             }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+            Button("Новая заметка") {
+                state.mode = .notes
+                state.selectedNoteID = nil
+                state.noteSearchText = ""
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+                NotificationCenter.default.post(name: .daylogNewNote, object: state)
+            }
+                .keyboardShortcut("n", modifiers: [.command, .option])
         }
         CommandGroup(after: .importExport) {
             Button("Экспорт в JSON…") { state.exportJSON() }
@@ -97,6 +106,13 @@ struct MenuBarContent: View {
         Button("Новый пункт плана…") {
             showWindow()
             state.requestFocus(.plan)
+        }
+        Button("Новая заметка…") {
+            state.mode = .notes
+            state.selectedNoteID = nil
+            state.noteSearchText = ""
+            showWindow()
+            NotificationCenter.default.post(name: .daylogNewNote, object: state)
         }
         Button("Открыть «Ход дня»") {
             showWindow()
