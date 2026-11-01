@@ -42,34 +42,7 @@ public enum DraftPolish {
 
     /// Достаёт текст записи из ответа Responses API и пропускает блок рассуждения.
     public static func parse(_ data: Data) throws -> String {
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw DraftPolishError.badResponse
-        }
-        if let output = json["output"] as? [Any] {
-            var parts: [String] = []
-            for item in output {
-                guard let obj = item as? [String: Any] else { continue }
-                if (obj["type"] as? String) == "reasoning" { continue }
-                if let content = obj["content"] as? String {
-                    parts.append(content)
-                    continue
-                }
-                guard let blocks = obj["content"] as? [Any] else { continue }
-                for block in blocks {
-                    guard let piece = block as? [String: Any] else { continue }
-                    let kind = piece["type"] as? String
-                    guard kind == nil || kind == "output_text" || kind == "text" else { continue }
-                    if let text = piece["text"] as? String { parts.append(text) }
-                }
-            }
-            let cleaned = cleanOutput(parts.joined(separator: "\n"))
-            if !cleaned.isEmpty { return cleaned }
-        }
-        if let direct = json["output_text"] as? String {
-            let cleaned = cleanOutput(direct)
-            if !cleaned.isEmpty { return cleaned }
-        }
-        throw DraftPolishError.badResponse
+        try XAIResponses.extractText(data, cleanOutput: cleanOutput)
     }
 
     public static func errorMessage(from data: Data) -> String {
@@ -87,15 +60,7 @@ public enum DraftPolish {
 
     /// Одна фраза для поля ввода: без ограды кода, внешней кавычки и подписи «Запись:».
     public static func cleanOutput(_ raw: String) -> String {
-        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("```") {
-            s = s.replacingOccurrences(of: "^```[A-Za-z]*\\n?", with: "", options: .regularExpression)
-            if let fence = s.range(of: "```", options: .backwards) {
-                s = String(s[..<fence.lowerBound])
-            }
-            s = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        s = stripOnePair(s)
+        let s = stripOnePair(XAIResponses.stripCodeFence(raw))
         let lines = s.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }

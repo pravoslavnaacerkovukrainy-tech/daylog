@@ -577,5 +577,14 @@ test("Заметки: мутация на заблокированном хра�
     expectError("add на блоке") { _ = try s.addNote(title: "x", body: "y") }
 }
 
+// MARK: xAI — общий разбор ответа
+
+test("XAIResponses: извлечение текста и снятие ограды") {
+    let json = #"{"output":[{"type":"reasoning"},{"type":"message","content":[{"type":"output_text","text":"Привет"}]}]}"#.data(using: .utf8)!
+    check(try XAIResponses.extractText(json) == "Привет", "текст из message")
+    check(XAIResponses.stripCodeFence("```\nсодержимое\n```") == "содержимое", "ограда снята")
+    expectError("пустой output") { _ = try XAIResponses.extractText(#"{"output":[]}"#.data(using: .utf8)!) }
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
