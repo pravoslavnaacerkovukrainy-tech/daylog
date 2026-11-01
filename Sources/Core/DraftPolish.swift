@@ -84,6 +84,7 @@ public enum DraftPolish {
 public enum DraftPolishError: Error, Equatable, LocalizedError {
     case empty
     case tooLong(Int)
+    case contextTooLarge(Int)
     case badResponse
     case http(Int, String)
     case noKey
@@ -94,6 +95,8 @@ public enum DraftPolishError: Error, Equatable, LocalizedError {
             return "Нечего причёсывать: поле записи пустое."
         case .tooLong(let count):
             return "Черновик слишком длинный для одного запроса (\(count) знаков, лимит \(DraftPolish.maxCharacters))."
+        case .contextTooLarge(let count):
+            return "Заметок слишком много для одного запроса (\(count) знаков). Удалите часть или задайте вопрос по меньшему объёму."
         case .badResponse:
             return "xAI ответил, но в ответе не нашлось текста записи."
         case .http(let code, let message):

@@ -645,5 +645,50 @@ test("Markdown: тело заметки не ломает структуру э�
     check(md.components(separatedBy: "```").count % 2 == 1, "ограды кода сбалансированы (нечётное число разделителей)")
 }
 
+// MARK: Чат по заметкам — контекст запроса
+
+test("NotesChat: нумерация заметок с 1, пустой заголовок, порядок") {
+    let a = DiaryNote(title: "Первая", body: "тело1", createdAt: Date(), updatedAt: Date())
+    let b = DiaryNote(title: "", body: "тело2", createdAt: Date(), updatedAt: Date())
+    let s = NotesChat.numberedNotes([a, b])
+    check(s.contains("[1] Первая"), "первая под номером 1")
+    check(s.contains("[2] Без заголовка"), "пустой заголовок → Без заголовка: \(s)")
+    check(s.range(of: "[1]")!.lowerBound < s.range(of: "[2]")!.lowerBound, "порядок сохранён")
+}
+test("NotesChat: buildInput — система+история+вопрос; пустой вопрос → ошибка") {
+    let note = DiaryNote(title: "T", body: "B", createdAt: Date(), updatedAt: Date())
+    let hist = [ChatMessage(role: .user, text: "привет"), ChatMessage(role: .assistant, text: "да")]
+    let input = try NotesChat.buildInput(notes: [note], history: hist, question: "что по T?")
+    check(input.first?["role"] as? String == "system", "первое — system")
+    check(input.count == 4, "system + 2 истории + вопрос: \(input.count)")
+    check(input.last?["content"] as? String == "что по T?", "последний — вопрос")
+    expectError("пустой вопрос") { _ = try NotesChat.buildInput(notes: [note], history: [], question: "  ") }
+}
+test("NotesChat: переразмер контекста → contextTooLarge") {
+    let big = DiaryNote(title: "x", body: String(repeating: "а", count: 130_000),
+                        createdAt: Date(), updatedAt: Date())
+    let err = expectError("слишком много") { _ = try NotesChat.buildInput(notes: [big], history: [], question: "?") }
+    if case .contextTooLarge = (err as? DraftPolishError) {} else { check(false, "ожидался contextTooLarge: \(String(describing: err))") }
+}
+
+// MARK: Чат по заметкам — разбор ответа и источников
+
+test("NotesChat.parse: ответ + источники, 'нет', отсутствие строки, пустой") {
+    let withSrc = #"{"output_text":"Ответ про кран.\n⟦источники: 1, 3⟧"}"#.data(using: .utf8)!
+    let r = try NotesChat.parse(withSrc)
+    check(r.answer == "Ответ про кран." && r.sources == [1, 3], "ответ без строки, источники [1,3]: \(r)")
+    let none = #"{"output_text":"Не нашёл в заметках.\n⟦источники: нет⟧"}"#.data(using: .utf8)!
+    check(try NotesChat.parse(none).sources.isEmpty, "'нет' → пусто")
+    let noLine = #"{"output_text":"Просто ответ"}"#.data(using: .utf8)!
+    let r2 = try NotesChat.parse(noLine)
+    check(r2.sources.isEmpty && r2.answer == "Просто ответ", "нет строки → фолбэк")
+    expectError("пустой ответ") { _ = try NotesChat.parse(#"{"output_text":"⟦источники: 1⟧"}"#.data(using: .utf8)!) }
+}
+test("NotesChat.resolveSources: отбрасывает вне диапазона, дедуп, порядок") {
+    check(NotesChat.resolveSources([1, 3, 5, 3], noteCount: 3) == [1, 3], "5 вне, дубль 3 убран")
+    check(NotesChat.resolveSources([0, -1, 2], noteCount: 2) == [2], "0/отриц. отброшены")
+    check(NotesChat.resolveSources([1, 2], noteCount: 0) == [], "noteCount=0 → пусто, без краша")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
