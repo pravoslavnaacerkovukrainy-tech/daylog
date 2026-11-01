@@ -41,8 +41,19 @@ cat Resources/Info.plist > "$APP/Contents/Info.plist"
 cat Resources/AppIcon.icns > "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-echo "→ Подпись ad hoc и строгая проверка (вне Documents)…"
-codesign --force --sign - "$APP"
+# Подпись. Если на этой машине есть локальная code-signing идентичность
+# (по умолчанию «Daylog Local Signing»), подписываем ею: её designated requirement
+# стабилен между пересборками, поэтому доступ к ключу xAI в Связке ключей не слетает
+# и его не нужно вводить заново. Если идентичности нет (чистый клон, другой Mac,
+# публичная сборка) — подпись ad hoc, как раньше. Сертификат в репозиторий не входит.
+SIGN_ID="${DAYLOG_SIGN_ID:-Daylog Local Signing}"
+if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+  echo "→ Подпись локальной идентичностью и строгая проверка (вне Documents)…"
+  codesign --force --sign "$SIGN_ID" "$APP"
+else
+  echo "→ Подпись ad hoc и строгая проверка (вне Documents)…"
+  codesign --force --sign - "$APP"
+fi
 codesign --verify --strict --verbose=2 "$APP"
 
 echo "→ ZIP без ресурсных вилок и расширенных атрибутов…"
