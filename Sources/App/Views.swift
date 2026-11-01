@@ -830,6 +830,7 @@ struct NoteEditor: View {
     @State private var polishBusy = false
     @State private var polishTask: Task<Void, Never>?
     @State private var confirmDelete = false
+    @State private var didSave = false
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case title, body }
@@ -896,7 +897,7 @@ struct NoteEditor: View {
         .padding(24)
         .background(Theme.canvas)
         .onAppear { focus = .title }
-        .onDisappear { polishTask?.cancel() }
+        .onDisappear { polishTask?.cancel(); persistIfNeeded() }
         .confirmationDialog("Удалить заметку?", isPresented: $confirmDelete) {
             Button("Удалить", role: .destructive, action: delete)
             Button("Отмена", role: .cancel) { }
@@ -950,12 +951,27 @@ struct NoteEditor: View {
     private func save() {
         guard !isBlank, !polishBusy, !state.isBlocked else { return }
         if let note {
-            _ = state.updateNote(id: note.id, title: title, body: text)
+            didSave = state.updateNote(id: note.id, title: title, body: text)
         } else {
             let previousIDs = Set(state.sortedNotes.map(\.id))
             if state.addNote(title: title, body: text) {
+                didSave = true
                 state.selectedNoteID = state.sortedNotes.first { !previousIDs.contains($0.id) }?.id
             }
+        }
+    }
+
+    /// Автосохранение при уходе из редактора, чтобы несохранённый набросок/правки не терялись
+    /// при переключении заметки или режима. После явного «Сохранить» (didSave) — пропускаем, без дублей.
+    private func persistIfNeeded() {
+        guard !didSave, !state.isBlocked else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let note {
+            if title != note.title || text != note.body {
+                _ = state.updateNote(id: note.id, title: title, body: text)
+            }
+        } else {
+            _ = state.addNote(title: title, body: text)
         }
     }
 

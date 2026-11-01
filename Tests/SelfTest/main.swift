@@ -627,5 +627,23 @@ test("JSON-экспорт включает заметки") {
     check(doc.notes.count == 1 && doc.notes.first?.title == "Экс", "заметка в JSON-экспорте")
 }
 
+// MARK: Заметки — фиксы по код-ревью
+
+test("NotePolish: пустой результат после очистки — ошибка, не пустая заметка") {
+    let emptyFence = #"{"output_text":"```\n\n```"}"#.data(using: .utf8)!
+    expectError("пустая ограда → ошибка, а не («», «»)") { _ = try NotePolish.parse(emptyFence) }
+}
+
+test("Markdown: тело заметки не ломает структуру экспорта") {
+    let s = DiaryStore(directory: freshDir("md-escape")); try s.load()
+    _ = try s.addNote(title: "A", body: "```\nнезакрытая ограда")
+    _ = try s.addNote(title: "ЗаголовокB", body: "## строка-похожая-на-заголовок")
+    let md = try s.exportMarkdown()
+    check(md.contains("### A"), "заголовок заметки A на месте")
+    check(md.contains("### ЗаголовокB"), "заголовок заметки B не поглощён")
+    check(md.contains("\\## строка-похожая-на-заголовок"), "строка '##' в теле экранирована")
+    check(md.components(separatedBy: "```").count % 2 == 1, "ограды кода сбалансированы (нечётное число разделителей)")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)

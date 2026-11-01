@@ -601,6 +601,23 @@ public final class DiaryStore {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Тело заметки для Markdown-экспорта: нейтрализуем структуру, чтобы одна заметка
+    /// не ломала документ. Экранируем строки-заголовки (#…) и закрываем незакрытые ограды кода.
+    static func escapeMarkdownBody(_ body: String) -> String {
+        var lines = body.components(separatedBy: "\n")
+        var fences = 0
+        for i in lines.indices {
+            let lead = lines[i].drop(while: { $0 == " " })
+            if lead.hasPrefix("#"), let idx = lines[i].firstIndex(of: "#") {
+                lines[i].insert("\\", at: idx)
+            }
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") { fences += 1 }
+        }
+        var out = lines.joined(separator: "\n")
+        if fences % 2 != 0 { out += "\n```" }
+        return out
+    }
+
     /// Порядок для интерфейса: закреплённые сверху, внутри групп — по updatedAt вниз.
     public func sortedNotes() -> [DiaryNote] {
         notes.sorted { a, b in
@@ -722,8 +739,9 @@ public final class DiaryStore {
         if !notes.isEmpty {
             out += "\n## Заметки\n"
             for n in sortedNotes() {
-                let title = n.title.isEmpty ? "Без заголовка" : n.title
-                out += "\n### \(title)\(n.pinned ? " 📌" : "")\n\n\(n.body)\n"
+                let rawTitle = n.title.isEmpty ? "Без заголовка" : n.title
+                let title = rawTitle.replacingOccurrences(of: "\n", with: " ")
+                out += "\n### \(title)\(n.pinned ? " 📌" : "")\n\n\(DiaryStore.escapeMarkdownBody(n.body))\n"
             }
         }
         return out

@@ -54,10 +54,13 @@ public enum NotePolish {
             }
         }
         // Фолбэк: весь текст — тело; заголовок — первая непустая строка (до 60 знаков).
+        // Если после очистки ничего не осталось — это не пустая заметка, а неудачный ответ.
+        let fallbackBody = unfenced.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fallbackBody.isEmpty else { throw DraftPolishError.badResponse }
         let firstLine = unfenced.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first(where: { !$0.isEmpty }) ?? ""
-        return (String(firstLine.prefix(60)), unfenced)
+        return (String(firstLine.prefix(60)), fallbackBody)
     }
 }
 
