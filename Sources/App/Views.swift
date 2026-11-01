@@ -59,7 +59,8 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if state.mode == .day {
+            switch state.mode {
+            case .day:
                 HStack(spacing: 0) {
                     mainColumn
                         .frame(minWidth: 440, maxWidth: .infinity)
@@ -69,9 +70,17 @@ struct ContentView: View {
                             .frame(width: 280)
                     }
                 }
-            } else {
+            case .notes:
                 VStack(spacing: 0) {
                     NotesView()
+                    statusArea
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 14)
+                }
+                .background(Theme.canvas)
+            case .ask:
+                VStack(spacing: 0) {
+                    AskView()
                     statusArea
                         .padding(.horizontal, 28)
                         .padding(.bottom, 14)
@@ -124,9 +133,10 @@ struct ContentView: View {
             Picker("Режим", selection: $state.mode) {
                 Text("День").tag(AppMode.day)
                 Text("Заметки").tag(AppMode.notes)
+                Text("Спросить").tag(AppMode.ask)
             }
             .pickerStyle(.segmented)
-            .frame(width: 170)
+            .frame(width: 260)
         }
         if state.mode == .day {
             ToolbarItemGroup(placement: .navigation) {
@@ -981,6 +991,157 @@ struct NoteEditor: View {
         if !state.sortedNotes.contains(where: { $0.id == note.id }) {
             state.selectedNoteID = nil
         }
+    }
+}
+
+// MARK: - Notes chat
+
+extension Notification.Name {
+    static let daylogAskFocus = Notification.Name("Daylog.askFocus")
+}
+
+struct AskView: View {
+    @EnvironmentObject var state: AppState
+    @State private var draft = ""
+    @FocusState private var inputFocused: Bool
+
+    private var draftIsBlank: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        if state.chatMessages.isEmpty {
+                            Text(state.sortedNotes.isEmpty
+                                 ? "Сначала создайте заметки, чтобы по ним спрашивать"
+                                 : "Спросите что-нибудь о своих заметках…")
+                                .font(.title3)
+                                .foregroundStyle(Theme.quiet)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: 460)
+                                .padding(.top, 80)
+                        } else {
+                            ForEach(state.chatMessages) { message in
+                                ChatBubble(message: message)
+                                    .id(message.id)
+                            }
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id("chat-bottom")
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity)
+                }
+                .onChange(of: state.chatMessages.count) { _, _ in
+                    withAnimation {
+                        proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    inputFocused = true
+                }
+            }
+
+            Divider()
+            HStack(alignment: .bottom, spacing: 12) {
+                TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...6)
+                    .foregroundStyle(Theme.ink)
+                    .focused($inputFocused)
+                    .disabled(state.chatBusy)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(inputFocused ? Theme.accent : Theme.rail,
+                                      lineWidth: inputFocused ? 1.5 : 1))
+                    .accessibilityLabel("Вопрос по заметкам")
+
+                if state.chatBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.bottom, 12)
+                        .accessibilityLabel("ИИ отвечает")
+                }
+                Button("Очистить") { state.clearChat() }
+                    .disabled(state.chatBusy || state.chatMessages.isEmpty)
+                Button("Спросить", action: submit)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .disabled(draftIsBlank || state.chatBusy)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 16)
+            .background(Theme.pane)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .daylogAskFocus)) { notification in
+            guard let source = notification.object as? AppState, source === state else { return }
+            inputFocused = true
+        }
+    }
+
+    private func submit() {
+        guard !draftIsBlank, !state.chatBusy else { return }
+        state.sendChat(draft)
+        draft = ""
+        inputFocused = true
+    }
+}
+
+private struct ChatBubble: View {
+    @EnvironmentObject var state: AppState
+    let message: ChatMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 60) }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text)
+                    .foregroundStyle(message.role == .user ? Theme.canvas : Theme.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if message.role == .assistant, !message.sourceNoteIDs.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(message.sourceNoteIDs, id: \.self) { id in
+                                if let note = state.sortedNotes.first(where: { $0.id == id }) {
+                                    Button {
+                                        state.openSource(id)
+                                    } label: {
+                                        Text(note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                             ? "Без заголовка" : note.title)
+                                            .font(.caption)
+                                            .lineLimit(1)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Capsule().fill(Theme.accent.opacity(0.12)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(Theme.accent)
+                                    .help("Открыть заметку-источник")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(message.role == .user ? Theme.accent : Theme.field))
+            .frame(maxWidth: 560, alignment: message.role == .user ? .trailing : .leading)
+            if message.role == .assistant { Spacer(minLength: 60) }
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 

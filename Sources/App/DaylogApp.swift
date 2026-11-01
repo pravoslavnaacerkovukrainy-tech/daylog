@@ -84,6 +84,13 @@ struct DaylogCommands: Commands {
             Button("Найти по всем дням") { state.requestFocus(.search) }
                 .keyboardShortcut("f")
             Divider()
+            Button("Спросить ИИ") {
+                state.mode = .ask
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+                NotificationCenter.default.post(name: .daylogAskFocus, object: state)
+            }
+            Divider()
             Button("Показать или скрыть план") { state.showPlan.toggle() }
                 .keyboardShortcut("p", modifiers: [.command, .option])
             Divider()
