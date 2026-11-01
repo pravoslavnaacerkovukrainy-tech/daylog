@@ -534,5 +534,48 @@ test("Документ: будущая версия 4 отвергается к�
     check((err as? DiaryError) == .unsupportedFormat("версия 4, приложение понимает версию до 3"), "сообщение про версию: \(String(describing: err))")
 }
 
+// MARK: Заметки — хранилище
+
+test("Заметки: add/update/delete/restore и пустое тело") {
+    let dir = freshDir("notes-crud"); let s = DiaryStore(directory: dir); try s.load()
+    let n = try s.addNote(title: "A", body: "текст")
+    check(s.notes.count == 1, "добавлена")
+    expectError("пустое тело") { _ = try s.addNote(title: "x", body: "   ") }
+    let u = try s.updateNote(id: n.id, title: "A2", body: "текст2")
+    check(u.title == "A2" && u.updatedAt >= n.updatedAt, "обновлена")
+    let d = try s.deleteNote(id: n.id); check(s.notes.isEmpty, "удалена")
+    try s.restoreNote(d); check(s.notes.count == 1, "восстановлена")
+    let s2 = DiaryStore(directory: dir); try s2.load()
+    check(s2.notes.count == 1, "сохранилось на диск")
+}
+test("Заметки: заголовок может быть пустым") {
+    let s = DiaryStore(directory: freshDir("notes-empty-title")); try s.load()
+    let n = try s.addNote(title: "   ", body: "есть тело")
+    check(n.title.isEmpty, "пустой заголовок допустим")
+}
+test("Заметки: порядок — закреплённые сверху, затем по updatedAt") {
+    let s = DiaryStore(directory: freshDir("notes-order")); try s.load()
+    let a = try s.addNote(title: "a", body: "1", now: Date(timeIntervalSince1970: 100))
+    let b = try s.addNote(title: "b", body: "2", now: Date(timeIntervalSince1970: 200))
+    _ = try s.setPinned(id: a.id, true)
+    let ids = s.sortedNotes().map { $0.id }
+    check(ids == [a.id, b.id], "закреплённая a впереди более новой b")
+    check(s.notes.first(where: { $0.id == a.id })!.updatedAt == a.updatedAt, "setPinned не трогает updatedAt")
+}
+test("Заметки: поиск по title и body, без учёта регистра") {
+    let s = DiaryStore(directory: freshDir("notes-search")); try s.load()
+    _ = try s.addNote(title: "Контакт техника", body: "позвонить")
+    _ = try s.addNote(title: "другое", body: "СЗІ отчёт")
+    check(s.searchNotes("техник").count == 1, "по заголовку")
+    check(s.searchNotes("сзі").count == 1, "по телу, регистр")
+}
+test("Заметки: мутация на заблокированном хранилище отвергается") {
+    let dir = freshDir("notes-blocked")
+    try Data("не json".utf8).write(to: dir.appendingPathComponent("entries.json"))
+    let s = DiaryStore(directory: dir); _ = try? s.load()
+    check(s.isBlocked, "хранилище заблокировано")
+    expectError("add на блоке") { _ = try s.addNote(title: "x", body: "y") }
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)

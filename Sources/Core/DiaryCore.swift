@@ -283,6 +283,7 @@ public final class DiaryStore {
     public var fileURL: URL { directory.appendingPathComponent(DiaryStore.fileName) }
     public private(set) var entries: [DiaryEntry] = []
     public private(set) var plans: [DayPlan] = []
+    public private(set) var notes: [DiaryNote] = []
     public private(set) var blockReason: String?
     public var isBlocked: Bool { blockReason != nil }
 
@@ -308,6 +309,7 @@ public final class DiaryStore {
         guard fm.fileExists(atPath: fileURL.path) else {
             entries = []
             plans = []
+            notes = []
             return
         }
         do {
@@ -320,22 +322,25 @@ public final class DiaryStore {
             let doc = try DiaryJSON.decode(data)
             entries = DiaryStore.sorted(doc.entries)
             plans = DiaryStore.sortedPlans(doc.plans)
+            notes = DiaryStore.sortNotesCanonical(doc.notes)
         } catch {
             entries = []
             plans = []
+            notes = []
             let diaryError = (error as? DiaryError) ?? DiaryError.unreadable(error.localizedDescription)
             blockReason = (diaryError.errorDescription ?? "ошибка чтения") + " Файл: \(fileURL.path)"
             throw diaryError
         }
     }
 
-    /// Единственная точка записи: записи и планы пишутся одним атомарным файлом.
-    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan]) throws {
+    /// Единственная точка записи: записи, планы и заметки пишутся одним атомарным файлом.
+    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan], notes newNotes: [DiaryNote]) throws {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
         let sortedEntries = DiaryStore.sorted(newEntries)
         let sortedPlans = DiaryStore.sortedPlans(newPlans)
+        let sortedNotes = DiaryStore.sortNotesCanonical(newNotes)
         do {
-            let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: sortedEntries, plans: sortedPlans))
+            let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes))
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
             try data.write(to: fileURL, options: .atomic)
         } catch {
@@ -343,6 +348,12 @@ public final class DiaryStore {
         }
         entries = sortedEntries
         plans = sortedPlans
+        notes = sortedNotes
+    }
+
+    /// Перегрузка для записей/планов: заметки не меняются.
+    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan]) throws {
+        try persist(entries: newEntries, plans: newPlans, notes: notes)
     }
 
     static func sorted(_ list: [DiaryEntry]) -> [DiaryEntry] {
@@ -356,6 +367,14 @@ public final class DiaryStore {
     static func sortedPlans(_ list: [DayPlan]) -> [DayPlan] {
         list.sorted { a, b in
             if a.day != b.day { return a.day < b.day }
+            if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    /// Каноничный порядок заметок в файле: по времени создания, добор по id.
+    static func sortNotesCanonical(_ list: [DiaryNote]) -> [DiaryNote] {
+        list.sorted { a, b in
             if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
             return a.id.uuidString < b.id.uuidString
         }
@@ -574,6 +593,80 @@ public final class DiaryStore {
         }
         try persist(entries: newEntries, plans: newPlans)
         return outcome
+    }
+
+    // MARK: Notes
+
+    static func cleanTitle(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Порядок для интерфейса: закреплённые сверху, внутри групп — по updatedAt вниз.
+    public func sortedNotes() -> [DiaryNote] {
+        notes.sorted { a, b in
+            if a.pinned != b.pinned { return a.pinned && !b.pinned }
+            if a.updatedAt != b.updatedAt { return a.updatedAt > b.updatedAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    @discardableResult
+    public func addNote(title: String, body: String, now: Date = Date()) throws -> DiaryNote {
+        let b = DiaryStore.cleanText(body)
+        guard !b.isEmpty else { throw DiaryError.emptyText }
+        let n = diaryNormalized(now)
+        let note = DiaryNote(title: DiaryStore.cleanTitle(title), body: b, createdAt: n, updatedAt: n)
+        try persist(entries: entries, plans: plans, notes: notes + [note])
+        return note
+    }
+
+    @discardableResult
+    public func updateNote(id: UUID, title: String, body: String, now: Date = Date()) throws -> DiaryNote {
+        let b = DiaryStore.cleanText(body)
+        guard !b.isEmpty else { throw DiaryError.emptyText }
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        var copy = notes
+        copy[idx].title = DiaryStore.cleanTitle(title)
+        copy[idx].body = b
+        copy[idx].updatedAt = diaryNormalized(now)
+        let updated = copy[idx]
+        try persist(entries: entries, plans: plans, notes: copy)
+        return updated
+    }
+
+    /// Закрепить/открепить. Не меняет updatedAt, чтобы закрепление не перетасовывало список по дате.
+    @discardableResult
+    public func setPinned(id: UUID, _ pinned: Bool) throws -> DiaryNote {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        var copy = notes
+        copy[idx].pinned = pinned
+        let updated = copy[idx]
+        try persist(entries: entries, plans: plans, notes: copy)
+        return updated
+    }
+
+    @discardableResult
+    public func deleteNote(id: UUID) throws -> DiaryNote {
+        guard let note = notes.first(where: { $0.id == id }) else { throw DiaryError.notFound }
+        try persist(entries: entries, plans: plans, notes: notes.filter { $0.id != id })
+        return note
+    }
+
+    /// Возврат только что удалённой заметки («Вернуть»).
+    public func restoreNote(_ note: DiaryNote) throws {
+        guard !notes.contains(where: { $0.id == note.id }) else { return }
+        try persist(entries: entries, plans: plans, notes: notes + [note])
+    }
+
+    /// Поиск по заголовку и телу, без учёта регистра и диакритики; порядок — как в интерфейсе.
+    public func searchNotes(_ query: String) -> [DiaryNote] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return [] }
+        let opts: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        return sortedNotes().filter { n in
+            n.title.range(of: q, options: opts, locale: DiaryFormat.ru) != nil
+                || n.body.range(of: q, options: opts, locale: DiaryFormat.ru) != nil
+        }
     }
 
     // MARK: Export
