@@ -8,15 +8,22 @@ enum FocusTarget: Hashable {
     case plan
 }
 
+/// Какое пространство показано в окне: день (записи + план) или заметочник.
+enum AppMode: Hashable {
+    case day
+    case notes
+}
+
 /// Последнее действие, которое можно отменить кнопкой в строке состояния.
 enum UndoAction: Equatable {
     case restoreEntry(DiaryEntry)
     case restorePlan(DayPlan)
     case reopenPlan(UUID)
+    case restoreNote(DiaryNote)
 
     var title: String {
         switch self {
-        case .restoreEntry, .restorePlan: return "Вернуть"
+        case .restoreEntry, .restorePlan, .restoreNote: return "Вернуть"
         case .reopenPlan: return "Отменить отметку"
         }
     }
@@ -28,8 +35,12 @@ final class AppState: ObservableObject {
 
     @Published private(set) var entries: [DiaryEntry] = []
     @Published private(set) var plans: [DayPlan] = []
+    @Published private(set) var notes: [DiaryNote] = []
+    @Published var mode: AppMode = .day
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
+    @Published var noteSearchText: String = ""
+    @Published var selectedNoteID: UUID?
     @Published var errorMessage: String?
     @Published var statusMessage: String?
     @Published var undo: UndoAction?
@@ -52,6 +63,7 @@ final class AppState: ObservableObject {
     private func refresh() {
         entries = store.entries
         plans = store.plans
+        notes = store.notes
     }
 
     var isBlocked: Bool { store.isBlocked }
@@ -60,6 +72,8 @@ final class AppState: ObservableObject {
     var dayEntries: [DiaryEntry] { _ = entries; return store.entriesOnDay(selectedDay) }
     var dayPlans: [DayPlan] { _ = plans; return store.plansOnDay(selectedDay) }
     var searchResults: [DiaryEntry] { _ = entries; return store.search(searchText) }
+    var sortedNotes: [DiaryNote] { _ = notes; return store.sortedNotes() }
+    var noteSearchResults: [DiaryNote] { _ = notes; return store.searchNotes(noteSearchText) }
     var isTodaySelected: Bool { Calendar.current.isDateInToday(selectedDay) }
 
     /// Второй уровень заголовка дня: «сегодня, воскресенье» / «вторник, 2025».
@@ -260,6 +274,73 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: Note mutations
+
+    @discardableResult
+    func addNote(title: String, body: String) -> Bool {
+        do {
+            _ = try store.addNote(title: title, body: body)
+            refresh()
+            undo = nil
+            saved("Заметка сохранена")
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func updateNote(id: UUID, title: String, body: String) -> Bool {
+        do {
+            _ = try store.updateNote(id: id, title: title, body: body)
+            refresh()
+            undo = nil
+            saved("Изменения сохранены")
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
+    }
+
+    func deleteNote(_ note: DiaryNote) {
+        do {
+            let removed = try store.deleteNote(id: note.id)
+            refresh()
+            undo = .restoreNote(removed)
+            saved("Заметка удалена")
+        } catch {
+            fail(error)
+        }
+    }
+
+    func setNotePinned(_ note: DiaryNote, _ pinned: Bool) {
+        do {
+            _ = try store.setPinned(id: note.id, pinned)
+            refresh()
+            undo = nil
+            saved(pinned ? "Заметка закреплена" : "Заметка откреплена")
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// «Оформить» в редакторе заметки: набросок → заголовок и тело через xAI.
+    /// Заметку всегда можно сохранить и без сети — ошибка ИИ не блокирует редактирование.
+    func polishNote(draft: String) async -> (title: String, body: String)? {
+        guard let key = XAIKeyStore.load() else {
+            showError(DraftPolishError.noKey.localizedDescription)
+            return nil
+        }
+        do {
+            return try await NotePolishClient().polish(draft: draft, apiKey: key)
+        } catch {
+            showError(error.localizedDescription)
+            return nil
+        }
+    }
+
     func performUndo() {
         guard let action = undo else { return }
         do {
@@ -274,6 +355,11 @@ final class AppState: ObservableObject {
                 refresh()
                 undo = nil
                 saved("Пункт плана возвращён")
+            case .restoreNote(let n):
+                try store.restoreNote(n)
+                refresh()
+                undo = nil
+                saved("Заметка возвращена")
             case .reopenPlan(let id):
                 reopenPlan(id: id)
             }
