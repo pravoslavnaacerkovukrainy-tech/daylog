@@ -52,6 +52,28 @@ public struct DayPlan: Codable, Identifiable, Equatable, Hashable {
     }
 }
 
+/// Заметка вне времени: сумбурный набросок, оформленный в заголовок + текст.
+/// Не привязана к дню. Живёт, пока не удалят.
+public struct DiaryNote: Codable, Identifiable, Equatable, Hashable {
+    public var id: UUID
+    public var title: String
+    public var body: String
+    public var createdAt: Date
+    public var updatedAt: Date
+    /// Закреплённые показываются выше остальных.
+    public var pinned: Bool
+
+    public init(id: UUID = UUID(), title: String, body: String,
+                createdAt: Date, updatedAt: Date, pinned: Bool = false) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.pinned = pinned
+    }
+}
+
 /// Ключ календарного дня без часовых поясов в файле: «2030-03-10».
 public enum DiaryDay {
     public static func key(_ date: Date, calendar: Calendar = .current) -> String {
@@ -67,29 +89,33 @@ public enum DiaryDay {
 }
 
 /// Версионированный документ: и файл хранилища, и файл экспорта JSON.
-/// Версия 1 — только записи. Версия 2 — записи + планы и связи.
-/// Файл без планов и связей по-прежнему пишется как версия 1 (его читает и прежняя сборка).
+/// Версия 1 — только записи. Версия 2 — записи + планы и связи. Версия 3 — + заметки.
+/// Файл без планов пишется как v1, с планами без заметок — v2 (его читает и прежняя сборка);
+/// как только появляются заметки — v3.
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var format: String
     public var version: Int
     public var exportedAt: Date?
     public var entries: [DiaryEntry]
     public var plans: [DayPlan]
+    public var notes: [DiaryNote]
 
-    public init(entries: [DiaryEntry], plans: [DayPlan] = [], exportedAt: Date? = nil) {
+    public init(entries: [DiaryEntry], plans: [DayPlan] = [], notes: [DiaryNote] = [], exportedAt: Date? = nil) {
         self.format = DiaryDocument.formatName
         self.exportedAt = exportedAt
         self.entries = entries
         self.plans = plans
+        self.notes = notes
         let needsV2 = !plans.isEmpty || entries.contains { $0.planID != nil }
-        self.version = needsV2 ? 2 : 1
+        let needsV3 = !notes.isEmpty
+        self.version = needsV3 ? 3 : (needsV2 ? 2 : 1)
     }
 
     enum CodingKeys: String, CodingKey {
-        case format, version, exportedAt, entries, plans
+        case format, version, exportedAt, entries, plans, notes
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +125,7 @@ public struct DiaryDocument: Codable {
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
         entries = try c.decode([DiaryEntry].self, forKey: .entries)
         plans = try c.decodeIfPresent([DayPlan].self, forKey: .plans) ?? []
+        notes = try c.decodeIfPresent([DiaryNote].self, forKey: .notes) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -108,6 +135,7 @@ public struct DiaryDocument: Codable {
         try c.encodeIfPresent(exportedAt, forKey: .exportedAt)
         try c.encode(entries, forKey: .entries)
         if !plans.isEmpty { try c.encode(plans, forKey: .plans) }
+        if !notes.isEmpty { try c.encode(notes, forKey: .notes) }
     }
 }
 

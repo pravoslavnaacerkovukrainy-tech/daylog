@@ -505,5 +505,34 @@ test("Причёсывание: запасные формы ответа и ош
     check(DraftPolish.errorMessage(from: err) == "Incorrect API key", "текст ошибки API")
 }
 
+// MARK: Заметки — модель и документ v3
+
+test("Документ: версия 3 только при наличии заметок") {
+    let note = DiaryNote(title: "T", body: "B", createdAt: Date(), updatedAt: Date())
+    check(DiaryDocument(entries: [], plans: [], notes: [note]).version == 3, "с заметкой → v3")
+    check(DiaryDocument(entries: [], plans: []).version == 1, "без ничего → v1")
+}
+test("Документ: round-trip записей, планов и заметок") {
+    let note = DiaryNote(title: "Загол", body: "Тело\nвторая строка", createdAt: diaryNormalized(Date()), updatedAt: diaryNormalized(Date()), pinned: true)
+    let doc = DiaryDocument(entries: [], plans: [], notes: [note])
+    let data = try DiaryJSON.encoder().encode(doc)
+    let back = try DiaryJSON.decode(data)
+    check(back.notes == [note], "заметки совпали после round-trip")
+}
+test("Документ: encode без заметок не пишет ключ notes и даёт ≤ v2") {
+    let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: [], plans: []))
+    let s = String(data: data, encoding: .utf8)!
+    check(!s.contains("\"notes\""), "ключ notes отсутствует: \(s)")
+}
+test("Документ: v2-файл читается как notes=[]") {
+    let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
+    check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
+}
+test("Документ: будущая версия 4 отвергается как неподдерживаемая") {
+    let v4 = #"{"format":"daylog","version":4,"entries":[],"notes":[]}"#.data(using: .utf8)!
+    let err = expectError("v4 не поддерживается") { _ = try DiaryJSON.decode(v4) }
+    check((err as? DiaryError) == .unsupportedFormat("версия 4, приложение понимает версию до 3"), "сообщение про версию: \(String(describing: err))")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
