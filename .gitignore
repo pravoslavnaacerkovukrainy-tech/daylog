@@ -9,3 +9,6 @@ review/
 
 # macOS
 .DS_Store
+
+# Рабочий каталог исполнения планов (ledger, логи)
+.superpowers/
