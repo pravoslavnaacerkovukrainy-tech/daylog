@@ -8,10 +8,11 @@ enum FocusTarget: Hashable {
     case plan
 }
 
-/// Какое пространство показано в окне: день (записи + план) или заметочник.
+/// Какое пространство показано в окне: день (записи + план), заметочник или чат.
 enum AppMode: Hashable {
     case day
     case notes
+    case ask
 }
 
 /// Последнее действие, которое можно отменить кнопкой в строке состояния.
@@ -37,6 +38,9 @@ final class AppState: ObservableObject {
     @Published private(set) var plans: [DayPlan] = []
     @Published private(set) var notes: [DiaryNote] = []
     @Published var mode: AppMode = .day
+    @Published var chatMessages: [ChatMessage] = []
+    @Published private(set) var chatBusy: Bool = false
+    private var chatTask: Task<Void, Never>?
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
@@ -339,6 +343,53 @@ final class AppState: ObservableObject {
             showError(error.localizedDescription)
             return nil
         }
+    }
+
+    // MARK: Notes chat
+
+    func sendChat(_ question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        guard !chatBusy else { return }
+        chatMessages.append(ChatMessage(role: .user, text: q))
+        let history = Array(chatMessages.dropLast())
+        chatBusy = true
+        chatTask = Task { @MainActor in
+            guard let key = XAIKeyStore.load() else {
+                showError(DraftPolishError.noKey.localizedDescription)
+                chatBusy = false
+                return
+            }
+            do {
+                let (answer, nums) = try await NotesChatClient().ask(
+                    notes: store.notes, history: history, question: q, apiKey: key
+                )
+                let valid = NotesChat.resolveSources(nums, noteCount: store.notes.count)
+                let ids = valid.map { store.notes[$0 - 1].id }
+                chatMessages.append(ChatMessage(role: .assistant, text: answer, sourceNoteIDs: ids))
+            } catch is CancellationError {
+                // Отмена — молча.
+            } catch let e as DraftPolishError {
+                if case .contextTooLarge = e {
+                    chatMessages.append(ChatMessage(role: .assistant, text: "⚠️ " + e.localizedDescription))
+                } else {
+                    showError(e.localizedDescription)
+                }
+            } catch {
+                showError(error.localizedDescription)
+            }
+            chatBusy = false
+        }
+    }
+
+    func clearChat() {
+        chatTask?.cancel()
+        chatMessages = []
+    }
+
+    func openSource(_ id: UUID) {
+        mode = .notes
+        selectedNoteID = id
     }
 
     func performUndo() {
