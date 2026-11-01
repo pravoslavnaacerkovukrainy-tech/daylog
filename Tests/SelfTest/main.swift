@@ -586,5 +586,22 @@ test("XAIResponses: извлечение текста и снятие оград
     expectError("пустой output") { _ = try XAIResponses.extractText(#"{"output":[]}"#.data(using: .utf8)!) }
 }
 
+// MARK: NotePolish — набросок в заголовок и заметку
+
+test("NotePolish: лимит и пустой набросок") {
+    expectError("пустой") { _ = try NotePolish.requestBody(draft: "  ") }
+    expectError("длинный") { _ = try NotePolish.requestBody(draft: String(repeating: "а", count: 6001)) }
+}
+test("NotePolish: чистый JSON, JSON в ограде, мусор → фолбэк") {
+    let clean = #"{"output":[{"content":"{\"title\":\"Звонок\",\"body\":\"Позвонить технику про СЗІ\"}"}]}"#.data(using: .utf8)!
+    let r1 = try NotePolish.parse(clean)
+    check(r1.title == "Звонок" && r1.body.contains("технику"), "чистый JSON: \(r1)")
+    let fenced = #"{"output_text":"```json\n{\"title\":\"Т\",\"body\":\"Тело\"}\n```"}"#.data(using: .utf8)!
+    check(try NotePolish.parse(fenced).title == "Т", "JSON в ограде")
+    let garbage = #"{"output_text":"Первая строка\nвторая строка"}"#.data(using: .utf8)!
+    let r3 = try NotePolish.parse(garbage)
+    check(r3.title == "Первая строка" && r3.body.contains("вторая"), "фолбэк: title из первой строки, \(r3)")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
