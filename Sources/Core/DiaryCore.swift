@@ -673,7 +673,7 @@ public final class DiaryStore {
 
     public func exportJSON(now: Date = Date()) throws -> Data {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
-        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, exportedAt: diaryNormalized(now)))
+        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now)))
     }
 
     public static func parseExport(_ data: Data) throws -> [DiaryEntry] {
@@ -689,6 +689,7 @@ public final class DiaryStore {
         var out = "# Ход дня — экспорт\n\n"
         out += "Экспортировано: \(DiaryFormat.stamp(now)). Записей: \(entries.count). "
         if !plans.isEmpty { out += "Пунктов плана: \(plans.count). " }
+        if !notes.isEmpty { out += "Заметок: \(notes.count). " }
         out += "Дни идут по порядку, внутри дня — по времени, от ранних к поздним.\n"
         let entryGroups = Dictionary(grouping: entries) { DiaryDay.key($0.timestamp, calendar: calendar) }
         let planGroups = Dictionary(grouping: plans) { $0.day }
@@ -716,6 +717,13 @@ public final class DiaryStore {
                 if let c = e.context {
                     out += "  - На чём остановился: \(c.replacingOccurrences(of: "\n", with: "\n    "))\n"
                 }
+            }
+        }
+        if !notes.isEmpty {
+            out += "\n## Заметки\n"
+            for n in sortedNotes() {
+                let title = n.title.isEmpty ? "Без заголовка" : n.title
+                out += "\n### \(title)\(n.pinned ? " 📌" : "")\n\n\(n.body)\n"
             }
         }
         return out

@@ -603,5 +603,29 @@ test("NotePolish: чистый JSON, JSON в ограде, мусор → фол
     check(r3.title == "Первая строка" && r3.body.contains("вторая"), "фолбэк: title из первой строки, \(r3)")
 }
 
+// MARK: Заметки — экспорт
+
+test("Markdown: секция заметок, порядок, многострочное тело") {
+    let s = DiaryStore(directory: freshDir("md-notes")); try s.load()
+    let a = try s.addNote(title: "Первая", body: "строка1\nстрока2")
+    _ = try s.addNote(title: "Вторая", body: "x")
+    _ = try s.setPinned(id: a.id, true)
+    let md = try s.exportMarkdown()
+    check(md.contains("## Заметки"), "есть секция")
+    check(md.range(of: "Первая")!.lowerBound < md.range(of: "Вторая")!.lowerBound, "закреплённая выше")
+    check(md.contains("строка1") && md.contains("строка2"), "многострочное тело не потеряно")
+}
+test("Markdown: без заметок секции нет") {
+    let s = DiaryStore(directory: freshDir("md-none")); try s.load()
+    _ = try s.add(text: "запись", context: nil)
+    check(!(try s.exportMarkdown().contains("## Заметки")), "секции нет")
+}
+test("JSON-экспорт включает заметки") {
+    let s = DiaryStore(directory: freshDir("json-notes")); try s.load()
+    _ = try s.addNote(title: "Экс", body: "тело")
+    let doc = try DiaryStore.parseExportDocument(s.exportJSON())
+    check(doc.notes.count == 1 && doc.notes.first?.title == "Экс", "заметка в JSON-экспорте")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
