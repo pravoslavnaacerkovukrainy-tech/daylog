@@ -687,6 +687,7 @@ test("NotesChat.parse: ответ + источники, 'нет', отсутст
 test("NotesChat.resolveSources: отбрасывает вне диапазона, дедуп, порядок") {
     check(NotesChat.resolveSources([1, 3, 5, 3], noteCount: 3) == [1, 3], "5 вне, дубль 3 убран")
     check(NotesChat.resolveSources([0, -1, 2], noteCount: 2) == [2], "0/отриц. отброшены")
+    check(NotesChat.resolveSources([1, 2], noteCount: 0) == [], "noteCount=0 → пусто, без краша")
 }
 
 print("\nПроверок: \(checks), ошибок: \(failures)")

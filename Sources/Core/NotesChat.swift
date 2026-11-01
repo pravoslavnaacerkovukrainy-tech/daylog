@@ -136,7 +136,7 @@ public enum NotesChat {
     public static func resolveSources(_ numbers: [Int], noteCount: Int) -> [Int] {
         var seen = Set<Int>()
         return numbers.filter { number in
-            guard (1 ... noteCount).contains(number) else { return false }
+            guard number >= 1, number <= noteCount else { return false }
             return seen.insert(number).inserted
         }
     }
