@@ -97,7 +97,7 @@ struct DaylogCommands: Commands {
                 state.summarizeDay()
             }
                 .keyboardShortcut("i", modifiers: [.command, .option])
-                .disabled(state.dayEntries.isEmpty || state.summaryBusy)
+                .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             Divider()
             Button("Показать или скрыть план") { state.showPlan.toggle() }
                 .keyboardShortcut("p", modifiers: [.command, .option])

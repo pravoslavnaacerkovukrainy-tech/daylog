@@ -22,7 +22,8 @@ public enum DaySummary {
         entries.map { entry in
             let text = entry.text.replacingOccurrences(of: "\n", with: "\n  ")
             var block = "\(DiaryFormat.time(entry.timestamp)) — \(text)"
-            if let context = entry.context, !context.isEmpty {
+            if let context = entry.context?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !context.isEmpty {
                 let ctx = context.replacingOccurrences(of: "\n", with: "\n    ")
                 block += "\n  на чём остановился: \(ctx)"
             }

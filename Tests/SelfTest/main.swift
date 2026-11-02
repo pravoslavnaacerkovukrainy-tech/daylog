@@ -716,6 +716,14 @@ test("DaySummary: buildDayText — многострочный текст с от
     check(text.contains("\n  Строка два"), "вторая строка перенесена с отступом")
 }
 
+test("DaySummary: context из одних пробелов не даёт строку контекста") {
+    let e = DiaryEntry(text: "Дело", context: "   \n  ",
+                       timestamp: date(2030, 3, 10, 8, 0),
+                       createdAt: date(2030, 3, 10, 8, 0), updatedAt: date(2030, 3, 10, 8, 0))
+    let text = DaySummary.buildDayText([e])
+    check(!text.lowercased().contains("на чём остановился"), "пробельный context не порождает строку контекста")
+}
+
 test("DaySummary: пустой день → .empty, сети нет") {
     let err = expectError("buildInput([]) бросает") { _ = try DaySummary.buildInput(entries: []) }
     check((err as? DraftPolishError) == .empty, "именно .empty")
