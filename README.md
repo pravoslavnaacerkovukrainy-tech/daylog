@@ -8,6 +8,12 @@
 Записывайте сделанное, сохраняйте мысли и возвращайтесь к начатому — без метрик, серий и слежки.
 
 <p>
+  <a href="https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/latest">
+    <img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C_%D0%B4%D0%BB%D1%8F_Mac-v0.1.0-2F6690?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать «Ход дня» для Mac" />
+  </a>
+</p>
+
+<p>
   <img src="https://img.shields.io/badge/macOS-14%2B-2F6690?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+" />
   <img src="https://img.shields.io/badge/SwiftUI-native-2F6690?style=flat-square&logo=swift&logoColor=white" alt="Нативное SwiftUI-приложение" />
   <img src="https://img.shields.io/badge/data-local--first-2F6690?style=flat-square" alt="Данные только на вашем Mac" />
