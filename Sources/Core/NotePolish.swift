@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Превращение сумбурного наброска в заметку {заголовок, тело} через xAI Responses API.
 /// В запрос попадает только текст наброска. Дневник, план и другие заметки не передаются.

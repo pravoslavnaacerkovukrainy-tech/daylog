@@ -72,7 +72,10 @@ test("Каталог данных: DAYLOG_DATA_DIR переопределяет 
     let custom = DiaryStore.defaultDirectory(environment: ["DAYLOG_DATA_DIR": "/tmp/daylog-x"])
     check(custom.path == "/tmp/daylog-x", "ожидался /tmp/daylog-x, получено \(custom.path)")
     let normal = DiaryStore.defaultDirectory(environment: [:])
+    check(normal.lastPathComponent == "Daylog", "каталог приложения называется Daylog: \(normal.path)")
+    #if os(macOS)
     check(normal.path.hasSuffix("Application Support/Daylog"), "обычный путь: \(normal.path)")
+    #endif
 }
 
 test("Добавление, автоматическое время и перезагрузка с диска") {

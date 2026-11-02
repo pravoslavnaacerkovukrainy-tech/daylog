@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Причёсывание одного черновика через xAI Responses API.
 /// В запрос попадает только переданный текст. Дневник и план сюда не передаются.
