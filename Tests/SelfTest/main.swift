@@ -760,5 +760,158 @@ test("DaySummary: parse — пропускает reasoning, берёт текс�
     check(out == "Спокойный итог дня.", "извлечён именно текст сообщения, получено: \(out)")
 }
 
+// MARK: Markdown в заметках — разбор для просмотра
+
+func plain(_ s: AttributedString) -> String { String(s.characters) }
+
+test("NoteMarkdown: пустой и пробельный текст → нет блоков, без краша") {
+    check(NoteMarkdown.parse("").isEmpty, "пустая строка")
+    check(NoteMarkdown.parse("   \n\t\n\n").isEmpty, "только пробелы и переводы строк")
+}
+
+test("NoteMarkdown: заголовки H1–H6, не-заголовки") {
+    let blocks = NoteMarkdown.parse("# Один\n## Два\n### Три\n#### Четыре\n##### Пять\n###### Шесть")
+    check(blocks == [.heading(level: 1, text: "Один"), .heading(level: 2, text: "Два"),
+                     .heading(level: 3, text: "Три"), .heading(level: 4, text: "Четыре"),
+                     .heading(level: 5, text: "Пять"), .heading(level: 6, text: "Шесть")], "шесть уровней: \(blocks)")
+    check(NoteMarkdown.parse("####### семь") == [.paragraph("####### семь")], "7 решёток — абзац")
+    check(NoteMarkdown.parse("#тег без пробела") == [.paragraph("#тег без пробела")], "хештег — не заголовок")
+    check(NoteMarkdown.parse("## Итог ##") == [.heading(level: 2, text: "Итог")], "закрывающие решётки сняты")
+    check(NoteMarkdown.parse("# Язык C#") == [.heading(level: 1, text: "Язык C#")], "C# не обрезан")
+}
+
+test("NoteMarkdown: абзацы и сохранённые переносы, CRLF") {
+    check(NoteMarkdown.parse("строка1\nстрока2") == [.paragraph("строка1\nстрока2")], "перенос внутри абзаца сохранён")
+    check(NoteMarkdown.parse("а\n\nб") == [.paragraph("а"), .paragraph("б")], "пустая строка разделяет абзацы")
+    check(NoteMarkdown.parse("а\r\nб\rв") == [.paragraph("а\nб\nв")], "CRLF/CR нормализованы")
+}
+
+test("NoteMarkdown: огороженный код — буквально, с языком, пробелы целы") {
+    let src = "До\n```swift\n    let x = 1   \n\n<b>**не жирный**</b>\n\tтаб\n```\nПосле"
+    let blocks = NoteMarkdown.parse(src)
+    check(blocks.count == 3, "абзац, код, абзац: \(blocks)")
+    check(blocks[1] == .code(language: "swift", code: "    let x = 1   \n\n<b>**не жирный**</b>\n\tтаб", closed: true),
+          "содержимое кода буквально: \(blocks[1])")
+    check(NoteMarkdown.parse("~~~\n# не заголовок\n~~~") == [.code(language: nil, code: "# не заголовок", closed: true)],
+          "ограда ~~~ без языка")
+    check(NoteMarkdown.parse("````\n```\n````") == [.code(language: nil, code: "```", closed: true)],
+          "короткая ограда внутри длинной — содержимое")
+}
+
+test("NoteMarkdown: незакрытая ограда не теряет текст") {
+    let blocks = NoteMarkdown.parse("Текст\n```\nкод\n# всё ещё код")
+    check(blocks == [.paragraph("Текст"), .code(language: nil, code: "код\n# всё ещё код", closed: false)],
+          "код до конца, closed=false: \(blocks)")
+    check(NoteMarkdown.parse("```") == [.code(language: nil, code: "", closed: false)], "одна ограда без краша")
+    check(NoteMarkdown.parse("```inline``` код") == [.paragraph("```inline``` код")], "``` с ` в info — не ограда")
+}
+
+test("NoteMarkdown: списки, вложенность, нумерация, задачи только для чтения") {
+    let src = "- один\n- [ ] купить\n- [x] сделано\n  - вложенный\n    * глубже\n1. первый\n1. второй\n5) пятый"
+    guard case let .list(items)? = NoteMarkdown.parse(src).first, NoteMarkdown.parse(src).count == 1 else {
+        check(false, "ожидался один список: \(NoteMarkdown.parse(src))"); return
+    }
+    check(items.count == 8, "8 пунктов: \(items.count)")
+    check(items[0] == MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "один"), "обычный пункт")
+    check(items[1].task == false && items[1].text == "купить", "[ ] → task=false")
+    check(items[2].task == true && items[2].text == "сделано", "[x] → task=true")
+    check(items[3].level == 1 && items[3].text == "вложенный", "уровень 1")
+    check(items[4].level == 2 && items[4].text == "глубже", "уровень 2")
+    check(items[5].level == 0 && items[5].ordered && items[5].number == 1, "нумерация с 1")
+    check(items[6].number == 2, "1. 1. → 1, 2 (последовательно)")
+    check(items[7].number == 3, "далее 3")
+    check(NoteMarkdown.parse("- [X]") == [.list([MarkdownListItem(level: 0, ordered: false, number: nil, task: true, text: "")])],
+          "пустая выполненная задача")
+    check(NoteMarkdown.parse("- [ ]без пробела").first == .list([MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "[ ]без пробела")]),
+          "без пробела — не задача")
+}
+
+test("NoteMarkdown: список после абзаца, ленивое продолжение, ложные списки") {
+    check(NoteMarkdown.parse("Покупки:\n- хлеб") == [.paragraph("Покупки:"), .list([MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "хлеб")])],
+          "маркированный пункт прерывает абзац")
+    check(NoteMarkdown.parse("Было\n1984. Оруэлл") == [.paragraph("Было\n1984. Оруэлл")], "число в середине абзаца — не список")
+    check(NoteMarkdown.parse("**жирный** текст") == [.paragraph("**жирный** текст")], "** в начале — не маркер")
+    check(NoteMarkdown.parse("-5 градусов") == [.paragraph("-5 градусов")], "минус без пробела — не маркер")
+    let lazy = NoteMarkdown.parse("- пункт\nпродолжение")
+    check(lazy == [.list([MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "пункт\nпродолжение")])],
+          "продолжение строки пункта: \(lazy)")
+    let loose = NoteMarkdown.parse("- а\n\n- б\n\nабзац")
+    check(loose.count == 2, "пустая строка между пунктами — тот же список, потом абзац: \(loose)")
+}
+
+test("NoteMarkdown: цитаты (вложенные блоки), линии, таблица как текст") {
+    check(NoteMarkdown.parse("> мысль\n> # заголовок") == [.quote([.paragraph("мысль"), .heading(level: 1, text: "заголовок")])],
+          "цитата с блоками внутри")
+    check(NoteMarkdown.parse(">> вложенная") == [.quote([.quote([.paragraph("вложенная")])])], "вложенная цитата")
+    let deep = NoteMarkdown.parse(String(repeating: ">", count: 50) + " глубоко")
+    check(!deep.isEmpty, "очень глубокая цитата без краша")
+    check(NoteMarkdown.parse("---") == [.rule] && NoteMarkdown.parse("* * *") == [.rule] && NoteMarkdown.parse("___") == [.rule], "линии")
+    let t = NoteMarkdown.parse("| а | б |\n|---|:-:|\n| 1 | 2 |\nпосле")
+    check(t.first == .table(["| а | б |", "|---|:-:|", "| 1 | 2 |"]), "таблица — литеральные строки: \(t)")
+    check(NoteMarkdown.parse("a | b").first == .paragraph("a | b"), "просто черта — абзац")
+}
+
+test("NoteMarkdown.inline: жирный, курсив, зачёркнутый, код") {
+    let s = NoteMarkdown.inline("**ж** *к* ~~з~~ `к<о>д`")
+    check(plain(s) == "ж к з к<о>д", "разметка снята, код буквально: \(plain(s))")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }, "есть жирный")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.emphasized) == true }, "есть курсив")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.strikethrough) == true }, "есть зачёркнутый")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.code) == true }, "есть код")
+    check(plain(NoteMarkdown.inline("а\nб")) == "а\nб", "перенос строки сохранён")
+}
+
+test("NoteMarkdown.inline: HTML, картинки и незакрытое — литеральный текст") {
+    check(plain(NoteMarkdown.inline("<script>alert(1)</script>")) == "<script>alert(1)</script>", "HTML — текст")
+    check(plain(NoteMarkdown.inline("<img src=x onerror=y>")) == "<img src=x onerror=y>", "img-тег — текст")
+    check(plain(NoteMarkdown.inline("a `b <c>")) == "a `b <c>", "незакрытый ` и угловые скобки видны")
+    check(plain(NoteMarkdown.inline("**незакрытый")) == "**незакрытый", "незакрытый ** виден")
+    let img = NoteMarkdown.inline("![кот](https://example.com/cat.png)")
+    check(plain(img) == "![кот](https://example.com/cat.png)", "картинка — литерал: \(plain(img))")
+    check(img.runs.allSatisfy { $0.imageURL == nil }, "у картинки нет imageURL — ничего не загружается")
+    check(plain(NoteMarkdown.inline("2 < 3 > 1")) == "2 < 3 > 1", "сравнения целы")
+    check(plain(NoteMarkdown.inline("путь C:\\temp")).contains("temp"), "обратный слеш без краша")
+}
+
+test("NoteMarkdown: ссылки — только http/https, остальные сняты") {
+    let ok = NoteMarkdown.inline("[сайт](https://example.com/a)")
+    check(plain(ok) == "сайт", "текст ссылки")
+    check(ok.runs.contains { $0.link?.absoluteString == "https://example.com/a" }, "https-ссылка оставлена")
+    let auto = NoteMarkdown.inline("<https://example.com>")
+    check(auto.runs.contains { $0.link?.host == "example.com" }, "автоссылка <https://…>")
+    for bad in ["[x](javascript:alert(1))", "[x](file:///etc/hosts)", "[x](data:text/html,hi)",
+                "[x](daylog://open)", "[x](mailto:a@example.com)", "[x](relative/path)", "<javascript:alert(1)>"] {
+        let s = NoteMarkdown.inline(bad)
+        check(s.runs.allSatisfy { $0.link == nil }, "нет ссылки: \(bad)")
+        check(!plain(s).isEmpty, "текст виден: \(bad)")
+    }
+    check(NoteMarkdown.isSafeLink(URL(string: "HTTPS://Example.com")!), "регистр схемы не важен")
+    check(NoteMarkdown.isSafeLink(URL(string: "http://example.com")!), "http разрешён")
+    check(!NoteMarkdown.isSafeLink(URL(string: "http:///path")!), "без хоста — нет")
+    check(!NoteMarkdown.isSafeLink(URL(string: "ftp://example.com")!), "ftp — нет")
+}
+
+test("NoteMarkdown: большой текст разбирается без краша") {
+    var big = ""
+    for n in 0..<3000 { big += "- пункт \(n) **ж**\n" + (n % 100 == 0 ? "```\nкод\n```\n" : "") }
+    let blocks = NoteMarkdown.parse(big)
+    check(!blocks.isEmpty, "блоки есть")
+}
+
+test("Заметки: сырой Markdown сохраняется в DiaryStore байт-в-байт") {
+    let dir = freshDir("notes-markdown")
+    let s = DiaryStore(directory: dir); try s.load()
+    let md = "# Заголовок\n\n- [ ] задача\n- [x] готово\n\n```sh\n  echo \"<b>\"   \n\tтаб\n```\n> цитата\n\n[ссылка](https://example.com) **жирный**"
+    let n = try s.addNote(title: "Md", body: md)
+    check(n.body == md, "тело при добавлении без изменений")
+    let s2 = DiaryStore(directory: dir); try s2.load()
+    check(s2.notes.first?.body == md, "после перезагрузки тело совпадает")
+    let md2 = md + "\n\n```\nнезакрытая ограда"
+    _ = try s2.updateNote(id: n.id, title: "Md", body: md2)
+    let s3 = DiaryStore(directory: dir); try s3.load()
+    check(s3.notes.first?.body == md2, "после правки тело совпадает")
+    check(s3.notes.first?.title == "Md", "заголовок — обычный текст")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
