@@ -424,7 +424,9 @@ final class AppState: ObservableObject {
                 if Task.isCancelled { return }
                 daySummary = text
             } catch is CancellationError {
-                // отмена — молча
+                // Отмена — молча и БЕЗ сброса summaryBusy: его снимает тот, кто отменил
+                // (clearDaySummary), либо им уже владеет новый запущенный запрос.
+                return
             } catch {
                 if Task.isCancelled { return }
                 showError(error.localizedDescription)
