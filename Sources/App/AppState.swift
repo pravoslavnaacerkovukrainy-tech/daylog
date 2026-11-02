@@ -41,6 +41,10 @@ final class AppState: ObservableObject {
     @Published var chatMessages: [ChatMessage] = []
     @Published private(set) var chatBusy: Bool = false
     private var chatTask: Task<Void, Never>?
+    /// Одноразовый итог текущего дня (не сохраняется; живёт, пока открыт sheet).
+    @Published private(set) var daySummary: String?
+    @Published private(set) var summaryBusy: Bool = false
+    private var summaryTask: Task<Void, Never>?
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
@@ -108,6 +112,7 @@ final class AppState: ObservableObject {
     func go(to date: Date) {
         selectedDay = Calendar.current.startOfDay(for: date)
         searchText = ""
+        clearDaySummary()
     }
 
     func goToday() { go(to: Date()) }
@@ -393,6 +398,47 @@ final class AppState: ObservableObject {
         chatTask?.cancel()
         chatBusy = false
         chatMessages = []
+    }
+
+    // MARK: Итог дня
+
+    /// Спокойный итог прожитого дня по его записям, через xAI. По явному действию.
+    /// Отправляются только записи выбранного дня; план и другие дни — нет. Ничего не сохраняется.
+    func summarizeDay() {
+        guard !summaryBusy else { return }
+        // Снимок записей дня: по нему и уходит запрос, правки во время запроса не влияют.
+        let snapshot = dayEntries
+        guard !snapshot.isEmpty else {
+            showDraftStatus("За этот день записей нет — нечего подытоживать.")
+            return
+        }
+        summaryBusy = true
+        summaryTask = Task { @MainActor in
+            guard let key = XAIKeyStore.load() else {
+                showError(DraftPolishError.noKey.localizedDescription)
+                summaryBusy = false
+                return
+            }
+            do {
+                let text = try await DaySummaryClient().summarize(entries: snapshot, apiKey: key)
+                if Task.isCancelled { return }
+                daySummary = text
+            } catch is CancellationError {
+                // Отмена — молча и БЕЗ сброса summaryBusy: его снимает тот, кто отменил
+                // (clearDaySummary), либо им уже владеет новый запущенный запрос.
+                return
+            } catch {
+                if Task.isCancelled { return }
+                showError(error.localizedDescription)
+            }
+            summaryBusy = false
+        }
+    }
+
+    func clearDaySummary() {
+        summaryTask?.cancel()
+        summaryBusy = false
+        daySummary = nil
     }
 
     func openSource(_ id: UUID) {

@@ -90,6 +90,14 @@ struct DaylogCommands: Commands {
                 openWindow(id: "main")
                 NotificationCenter.default.post(name: .daylogAskFocus, object: state)
             }
+            Button("Итог дня…") {
+                state.mode = .day
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+                state.summarizeDay()
+            }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(state.dayEntries.isEmpty || state.summaryBusy)
             Divider()
             Button("Показать или скрыть план") { state.showPlan.toggle() }
                 .keyboardShortcut("p", modifiers: [.command, .option])
