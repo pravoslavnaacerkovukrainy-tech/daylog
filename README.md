@@ -75,6 +75,11 @@ open build/Daylog.app
 bash test.sh
 ```
 
+На macOS скрипт собирает тесты Swift из Command Line Tools. Если macOS SDK нет
+(например, Linux в Cloud Agent), тот же `bash test.sh` использует `swiftc` из `PATH`.
+Сетевые типы xAI на Linux подключаются через `FoundationNetworking`; само приложение
+по-прежнему собирается только на macOS (`bash build.sh`).
+
 ### Ключ xAI (необязательно)
 
 Нужен только если хотите пользоваться кнопкой «Причесать». В приложении: меню
