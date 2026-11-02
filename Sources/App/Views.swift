@@ -123,6 +123,11 @@ struct ContentView: View {
                 onDelete: deleteKey
             )
         }
+        .sheet(isPresented: Binding(get: { state.daySummary != nil || state.summaryBusy },
+                                    set: { if !$0 { state.clearDaySummary() } })) {
+            DaySummarySheet(summary: state.daySummary, busy: state.summaryBusy,
+                            day: state.selectedDay, onClose: state.clearDaySummary)
+        }
     }
 
     // MARK: Toolbar
@@ -155,6 +160,13 @@ struct ContentView: View {
                     .labelsHidden()
                     .datePickerStyle(.compact)
                     .help("Выбрать день")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { state.summarizeDay() } label: {
+                    Label("Итог дня", systemImage: "doc.plaintext")
+                }
+                .help("Спокойный итог дня через xAI (⌥⌘I)")
+                .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { state.showPlan.toggle() } label: {
@@ -1475,6 +1487,58 @@ private struct PolishConfirmSheet: View {
                 Button(busy ? "Отправляю…" : "Отправить", action: onSend)
                     .keyboardShortcut(.defaultAction)
                     .disabled(busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .interactiveDismissDisabled(busy)
+    }
+}
+
+private struct DaySummarySheet: View {
+    let summary: String?
+    let busy: Bool
+    let day: Date
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Итог за \(DiaryFormat.shortDate(day))")
+                .font(.title2.bold())
+                .foregroundStyle(Theme.ink)
+            if busy {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Подвожу итог дня…").foregroundStyle(Theme.quiet)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+                .accessibilityLabel("Подвожу итог дня")
+            } else if let summary {
+                Text(summary)
+                    .font(.body)
+                    .foregroundStyle(Theme.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Text("Одноразово: в дневник не записывается, на сервере xAI не сохраняется.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                if let summary, !busy {
+                    Button("Скопировать") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(summary, forType: .string)
+                    }
+                }
+                Button("Закрыть", action: onClose)
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
