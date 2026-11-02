@@ -690,5 +690,67 @@ test("NotesChat.resolveSources: отбрасывает вне диапазона
     check(NotesChat.resolveSources([1, 2], noteCount: 0) == [], "noteCount=0 → пусто, без краша")
 }
 
+// MARK: Итог дня — сборка контекста и разбор ответа
+
+test("DaySummary: buildDayText — время, текст, контекст") {
+    let e1 = DiaryEntry(text: "Завтрак", context: nil,
+                        timestamp: date(2030, 3, 10, 9, 30),
+                        createdAt: date(2030, 3, 10, 9, 30), updatedAt: date(2030, 3, 10, 9, 30))
+    let e2 = DiaryEntry(text: "Правил отчёт", context: "остановился на разделе 2",
+                        timestamp: date(2030, 3, 10, 14, 5),
+                        createdAt: date(2030, 3, 10, 14, 5), updatedAt: date(2030, 3, 10, 14, 5))
+    let text = DaySummary.buildDayText([e1, e2])
+    check(text.contains("09:30"), "есть время первой записи")
+    check(text.contains("Завтрак"), "есть текст первой записи")
+    check(text.contains("остановился на разделе 2"), "есть контекст второй записи")
+    let firstBlock = text.components(separatedBy: "14:05").first ?? ""
+    check(!firstBlock.lowercased().contains("на чём остановился"), "у записи без контекста нет строки контекста")
+}
+
+test("DaySummary: buildDayText — многострочный текст с отступом") {
+    let e = DiaryEntry(text: "Строка один\nСтрока два", context: nil,
+                       timestamp: date(2030, 3, 10, 8, 0),
+                       createdAt: date(2030, 3, 10, 8, 0), updatedAt: date(2030, 3, 10, 8, 0))
+    let text = DaySummary.buildDayText([e])
+    check(text.contains("08:00 — Строка один"), "первая строка идёт за временем")
+    check(text.contains("\n  Строка два"), "вторая строка перенесена с отступом")
+}
+
+test("DaySummary: пустой день → .empty, сети нет") {
+    let err = expectError("buildInput([]) бросает") { _ = try DaySummary.buildInput(entries: []) }
+    check((err as? DraftPolishError) == .empty, "именно .empty")
+}
+
+test("DaySummary: слишком большой контекст → .contextTooLarge") {
+    let big = String(repeating: "я", count: DaySummary.maxContextCharacters + 10)
+    let e = DiaryEntry(text: big, context: nil, timestamp: date(2030, 3, 10, 8, 0),
+                       createdAt: date(2030, 3, 10, 8, 0), updatedAt: date(2030, 3, 10, 8, 0))
+    let err = expectError("buildInput большой день бросает") { _ = try DaySummary.buildInput(entries: [e]) }
+    if case .contextTooLarge = (err as? DraftPolishError) { check(true, "именно .contextTooLarge") }
+    else { check(false, "ожидался .contextTooLarge, получено \(String(describing: err))") }
+}
+
+test("DaySummary: requestBody — store:false и роли") {
+    let e = DiaryEntry(text: "Дело", context: nil, timestamp: date(2030, 3, 10, 8, 0),
+                       createdAt: date(2030, 3, 10, 8, 0), updatedAt: date(2030, 3, 10, 8, 0))
+    let data = try DaySummary.requestBody(entries: [e])
+    let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    check((json["store"] as? Bool) == false, "store:false")
+    check((json["model"] as? String) == DaySummary.model, "модель grok-4.7")
+    let input = json["input"] as! [[String: Any]]
+    check(input.first?["role"] as? String == "system", "первый — system")
+    check(input.last?["role"] as? String == "user", "последний — user")
+}
+
+test("DaySummary: parse — пропускает reasoning, берёт текст") {
+    let fixture: [String: Any] = ["output": [
+        ["type": "reasoning", "content": "размышления"],
+        ["type": "message", "content": [["type": "output_text", "text": "Спокойный итог дня."]]],
+    ]]
+    let data = try JSONSerialization.data(withJSONObject: fixture)
+    let out = try DaySummary.parse(data)
+    check(out == "Спокойный итог дня.", "извлечён именно текст сообщения, получено: \(out)")
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)
