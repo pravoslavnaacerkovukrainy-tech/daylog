@@ -191,7 +191,7 @@ struct OrganizerView: View {
             }
             if current == .all {
                 Toggle("Показывать выполненные", isOn: $showCompleted)
-                    .toggleStyle(.checkbox).padding(.horizontal, 20).padding(.vertical, 10)
+                    .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 20).padding(.vertical, 10)
             }
             List {
                 if current == .review, !reviewProjects.isEmpty {
@@ -333,7 +333,7 @@ struct OrganizerView: View {
     private var projectList: some View {
         VStack(alignment: .leading, spacing: 0) {
             Toggle("Показывать завершённые проекты", isOn: $showArchived)
-                .toggleStyle(.checkbox).padding(.horizontal, 20).padding(.vertical, 12)
+                .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 20).padding(.vertical, 12)
             List {
                 ForEach(matchingProjects) { project in
                     Button { selectedProjectID = project.id } label: {
@@ -422,7 +422,7 @@ struct OrganizerView: View {
                     }.padding(12).background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                 }
                 HStack {
-                    Toggle("Выполненные", isOn: $showCompleted).toggleStyle(.checkbox)
+                    Toggle("Выполненные", isOn: $showCompleted).toggleStyle(QuietCheckboxStyle())
                     Spacer()
                     Button { newTask(project: project) } label: { Label("Добавить действие", systemImage: "plus") }
                         .disabled(project.archived || state.isBlocked)
@@ -619,7 +619,7 @@ private struct OrganizerDateField: View {
     @Binding var date: Date
     var body: some View {
         HStack {
-            Toggle(title, isOn: $enabled).toggleStyle(.checkbox)
+            Toggle(title, isOn: $enabled).toggleStyle(QuietCheckboxStyle())
             Spacer()
             if enabled { DatePicker(title, selection: $date, displayedComponents: .date).labelsHidden() }
         }

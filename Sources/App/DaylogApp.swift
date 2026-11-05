@@ -42,7 +42,27 @@ struct DaylogCommands: Commands {
     let state: AppState
     @Environment(\.openWindow) private var openWindow
 
+    private func show(_ mode: AppMode) {
+        state.mode = mode
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "main")
+    }
+
     var body: some Commands {
+        CommandGroup(before: .toolbar) {
+            Button("Дела") { show(.organizer) }
+                .keyboardShortcut("1")
+            Button("Дневник") { show(.day) }
+                .keyboardShortcut("2")
+            Button("Заметки") { show(.notes) }
+                .keyboardShortcut("3")
+            Button("Спросить") {
+                show(.ask)
+                NotificationCenter.default.post(name: .daylogAskFocus, object: state)
+            }
+                .keyboardShortcut("4")
+            Divider()
+        }
         CommandGroup(replacing: .newItem) {
             Button("Новая запись") {
                 NSApp.activate(ignoringOtherApps: true)

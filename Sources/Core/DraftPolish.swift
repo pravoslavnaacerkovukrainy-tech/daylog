@@ -47,10 +47,16 @@ public enum DraftPolish {
 
     public static func errorMessage(from data: Data) -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        if let err = json["error"] as? [String: Any], let message = err["message"] as? String {
-            return message
+        // xAI отвечает {"code":…,"error":"текст"}; формат {"error":{"message":…}} оставлен для совместимости.
+        let candidates: [String?] = [
+            (json["error"] as? [String: Any])?["message"] as? String,
+            json["error"] as? String,
+            json["message"] as? String,
+        ]
+        for candidate in candidates {
+            let text = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !text.isEmpty { return text }
         }
-        if let message = json["message"] as? String { return message }
         return ""
     }
 

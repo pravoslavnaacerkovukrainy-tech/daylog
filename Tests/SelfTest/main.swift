@@ -503,6 +503,12 @@ test("Причёсывание: запасные формы ответа и ош
     expectError("пустой output") { _ = try DraftPolish.parse(#"{"output":[]}"#.data(using: .utf8)!) }
     let err = #"{"error":{"message":"Incorrect API key"}}"#.data(using: .utf8)!
     check(DraftPolish.errorMessage(from: err) == "Incorrect API key", "текст ошибки API")
+    let xaiError = #"{"code":"invalid-argument","error":"Incorrect API key provided."}"#.data(using: .utf8)!
+    check(DraftPolish.errorMessage(from: xaiError) == "Incorrect API key provided.", "ошибка xAI строкой в поле error")
+    let blankError = #"{"code":"invalid-argument","error":"  "}"#.data(using: .utf8)!
+    check(DraftPolish.errorMessage(from: blankError).isEmpty, "пустой текст ошибки не показывается")
+    let http = DraftPolishError.http(400, "Incorrect API key provided.")
+    check(http.localizedDescription.contains("Incorrect API key provided."), "причина видна пользователю")
 }
 
 // MARK: Заметки — модель и документ v3

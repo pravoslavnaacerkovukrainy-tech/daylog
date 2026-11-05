@@ -3,6 +3,22 @@ import AppKit
 
 // MARK: - Theme (токены — см. DESIGN.md)
 
+/// Флажок с заметной рамкой: системный на macOS 27 почти сливается с фоном.
+struct QuietCheckboxStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(configuration.isOn ? Theme.accent : Theme.quiet)
+                configuration.label
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(configuration.isOn ? "включено" : "выключено")
+    }
+}
+
 enum Theme {
     /// Лист ленты дня.
     static let canvas = Color(nsColor: .textBackgroundColor)
@@ -38,6 +54,7 @@ struct ContentView: View {
     @State private var draftText = ""
     @State private var draftContext = ""
     @State private var showContext = false
+    @State private var showDayPicker = false
     @State private var customTime = false
     @State private var draftTime = Date()
     @State private var editing: DiaryEntry?
@@ -58,7 +75,9 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            modeBar
+            Group {
             switch state.mode {
             case .organizer:
                 VStack(spacing: 0) {
@@ -91,6 +110,7 @@ struct ContentView: View {
                         .padding(.bottom, 14)
                 }
                 .background(Theme.canvas)
+            }
             }
         }
         .frame(minWidth: 720, minHeight: 520)
@@ -137,9 +157,9 @@ struct ContentView: View {
 
     // MARK: Toolbar
 
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
+    /// Режимы вынесены из тулбара: там при узком окне они уходили в меню переполнения.
+    private var modeBar: some View {
+        VStack(spacing: 0) {
             Picker("Режим", selection: $state.mode) {
                 Text("Дела").tag(AppMode.organizer)
                 Text("Дневник").tag(AppMode.day)
@@ -147,8 +167,17 @@ struct ContentView: View {
                 Text("Спросить").tag(AppMode.ask)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .frame(width: 350)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            Divider()
         }
+        .background(Theme.pane)
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
         if state.mode == .day {
             ToolbarItemGroup(placement: .navigation) {
                 Button { state.goPrev() } label: {
@@ -161,11 +190,15 @@ struct ContentView: View {
                 .help("Следующий день (⌘])")
                 Button("Сегодня") { state.goToday() }
                     .help("Перейти к сегодняшнему дню (⌘T)")
-                DatePicker("День", selection: Binding(get: { state.selectedDay }, set: { state.go(to: $0) }),
-                           displayedComponents: .date)
-                    .labelsHidden()
-                    .datePickerStyle(.compact)
+                Button(DiaryFormat.shortDate(state.selectedDay)) { showDayPicker.toggle() }
                     .help("Выбрать день")
+                    .popover(isPresented: $showDayPicker, arrowEdge: .bottom) {
+                        DatePicker("День", selection: Binding(get: { state.selectedDay }, set: { state.go(to: $0) }),
+                                   displayedComponents: .date)
+                            .labelsHidden()
+                            .datePickerStyle(.graphical)
+                            .padding(12)
+                    }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { state.summarizeDay() } label: {
@@ -340,14 +373,14 @@ struct ContentView: View {
 
     private var timeToggle: some View {
         Toggle("Другое время", isOn: $customTime)
-            .toggleStyle(.checkbox)
+            .toggleStyle(QuietCheckboxStyle())
             .fixedSize()
             .help("Без отметки время записи ставится автоматически")
     }
 
     private var contextToggle: some View {
         Toggle("На чём остановился", isOn: $showContext)
-            .toggleStyle(.checkbox)
+            .toggleStyle(QuietCheckboxStyle())
             .fixedSize()
     }
 
@@ -1274,11 +1307,6 @@ struct EntryRow: View {
                         .foregroundStyle(Theme.quiet)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if entry.planID != nil {
-                    Text("Из плана")
-                        .font(.caption)
-                        .foregroundStyle(Theme.quiet)
-                }
             }
             Spacer(minLength: 8)
             HStack(spacing: 10) {
@@ -1332,7 +1360,9 @@ struct EntryRow: View {
         .padding(3)
         .background(Circle().fill(Theme.canvas))
         .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 4 }
-        .accessibilityHidden(true)
+        .help(entry.planID != nil ? "Из плана" : "")
+        .accessibilityLabel("Из плана")
+        .accessibilityHidden(entry.planID == nil)
     }
 }
 
