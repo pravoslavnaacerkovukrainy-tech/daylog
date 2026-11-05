@@ -2,7 +2,7 @@ import Foundation
 
 /// Одноразовый спокойный итог прожитого дня через xAI Responses API.
 /// В запрос попадают только записи выбранного дня. План и другие дни не передаются.
-/// Итог никуда не сохраняется (`store: false`, в `entries.json` не пишется).
+/// Ответ не сохраняется приложением и не записывается в `entries.json`.
 public enum DaySummary {
     public static let model = "grok-4.7"
     public static let endpoint = URL(string: "https://api.x.ai/v1/responses")!
@@ -43,7 +43,7 @@ public enum DaySummary {
         ]
     }
 
-    /// Тело запроса. `store: false` — xAI не сохраняет этот запрос у себя.
+    /// `store: false` просит xAI не сохранять запрос; условия обработки определяет xAI.
     public static func requestBody(entries: [DiaryEntry]) throws -> Data {
         let payload: [String: Any] = [
             "model": model,

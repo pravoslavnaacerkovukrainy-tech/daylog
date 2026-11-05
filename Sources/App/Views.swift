@@ -60,6 +60,11 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch state.mode {
+            case .organizer:
+                VStack(spacing: 0) {
+                    OrganizerView(state: state)
+                    statusArea.padding(.horizontal, 20).padding(.bottom, 10)
+                }
             case .day:
                 HStack(spacing: 0) {
                     mainColumn
@@ -136,12 +141,13 @@ struct ContentView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             Picker("Режим", selection: $state.mode) {
-                Text("День").tag(AppMode.day)
+                Text("Дела").tag(AppMode.organizer)
+                Text("Дневник").tag(AppMode.day)
                 Text("Заметки").tag(AppMode.notes)
                 Text("Спросить").tag(AppMode.ask)
             }
             .pickerStyle(.segmented)
-            .frame(width: 260)
+            .frame(width: 350)
         }
         if state.mode == .day {
             ToolbarItemGroup(placement: .navigation) {
@@ -852,17 +858,31 @@ struct NoteEditor: View {
     @State private var polishBusy = false
     @State private var polishTask: Task<Void, Never>?
     @State private var confirmDelete = false
-    @State private var didSave = false
+    /// Заметка, в которую пишет этот редактор: id исходной или созданной первым сохранением/автосохранением.
+    /// Не nil → повторный addNote невозможен (нет дублей).
+    @State private var persistedID: UUID?
+    /// Последнее записанное в хранилище состояние черновика. Автосохранение срабатывает, если
+    /// title/text от него отличаются — любая правка после «Сохранить», включая отмену оформления.
+    @State private var savedTitle: String
+    @State private var savedText: String
+    /// Режим только для показа: переключение ничего не сохраняет и не трогает черновик.
+    @State private var mode: Mode = .editor
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case title, body }
+    private enum Mode: Hashable { case editor, preview }
 
     init(state: AppState, note: DiaryNote?) {
         self.state = state
         self.note = note
         _title = State(initialValue: note?.title ?? "")
         _text = State(initialValue: note?.body ?? "")
+        _persistedID = State(initialValue: note?.id)
+        _savedTitle = State(initialValue: note?.title ?? "")
+        _savedText = State(initialValue: note?.body ?? "")
     }
+
+    private var isDirty: Bool { title != savedTitle || text != savedText }
 
     private var isBlank: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -881,20 +901,51 @@ struct NoteEditor: View {
                 .accessibilityLabel("Заголовок заметки")
                 .disabled(polishBusy || state.isBlocked)
 
-            Text("Текст заметки")
-                .font(.caption)
-                .foregroundStyle(Theme.quiet)
-            TextEditor(text: $text)
-                .font(.body)
-                .foregroundStyle(Theme.ink)
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(focus == .body ? Theme.accent : Theme.rail, lineWidth: focus == .body ? 1.5 : 1))
-                .focused($focus, equals: .body)
-                .accessibilityLabel("Текст заметки")
-                .disabled(polishBusy || state.isBlocked)
+            HStack(alignment: .center, spacing: 8) {
+                Text("Текст заметки (Markdown)")
+                    .font(.caption)
+                    .foregroundStyle(Theme.quiet)
+                    .lineLimit(1)
+                    .help(Text(verbatim: "Поддерживается Markdown: # заголовки, **жирный**, *курсив*, списки, - [ ] задачи, > цитаты, ``` код, ссылки."))
+                Spacer(minLength: 8)
+                Picker("Режим заметки", selection: $mode) {
+                    Text("Редактор").tag(Mode.editor)
+                    Text("Просмотр").tag(Mode.preview)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityLabel("Режим заметки")
+                .help("Редактор — исходный текст. Просмотр — оформленный вид без сохранения.")
+            }
+            // TextEditor не убирается из иерархии в режиме просмотра: так сохраняются текст,
+            // выделение и прокрутка, и не срабатывает onDisappear/автосохранение.
+            ZStack {
+                TextEditor(text: $text)
+                    .font(.body)
+                    .foregroundStyle(Theme.ink)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(focus == .body ? Theme.accent : Theme.rail, lineWidth: focus == .body ? 1.5 : 1))
+                    .focused($focus, equals: .body)
+                    .accessibilityLabel("Текст заметки")
+                    .disabled(polishBusy || state.isBlocked || mode != .editor)
+                    .opacity(mode == .editor ? 1 : 0)
+                    .allowsHitTesting(mode == .editor)
+                    .accessibilityHidden(mode != .editor)
+                if mode == .preview {
+                    NoteMarkdownView(source: text)
+                }
+            }
+            .onChange(of: mode) { _, newMode in
+                if newMode == .preview {
+                    if focus == .body { focus = nil }
+                } else if !polishBusy && !state.isBlocked {
+                    focus = .body
+                }
+            }
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) { polishControls }
@@ -933,6 +984,7 @@ struct NoteEditor: View {
         HStack(spacing: 8) {
             Button("Оформить", action: beginPolish)
                 .disabled(polishDraft.isEmpty || polishBusy || state.isBlocked)
+                .help("В xAI отправятся заголовок и текст текущего наброска; дневник, план и другие заметки не отправляются.")
             if polishBusy {
                 ProgressView()
                     .controlSize(.small)
@@ -957,7 +1009,12 @@ struct NoteEditor: View {
         polishBusy = true
         polishTask = Task {
             let result = await state.polishNote(draft: draft)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                // Поздний результат отбрасываем, но не оставляем кнопки навсегда занятыми.
+                polishBusy = false
+                polishTask = nil
+                return
+            }
             polishBusy = false
             polishTask = nil
             if let result {
@@ -972,29 +1029,39 @@ struct NoteEditor: View {
 
     private func save() {
         guard !isBlank, !polishBusy, !state.isBlocked else { return }
-        if let note {
-            didSave = state.updateNote(id: note.id, title: title, body: text)
-        } else {
-            let previousIDs = Set(state.sortedNotes.map(\.id))
-            if state.addNote(title: title, body: text) {
-                didSave = true
-                state.selectedNoteID = state.sortedNotes.first { !previousIDs.contains($0.id) }?.id
-            }
+        let wasNew = persistedID == nil
+        if write(), wasNew, let id = persistedID {
+            state.selectedNoteID = id
         }
     }
 
-    /// Автосохранение при уходе из редактора, чтобы несохранённый набросок/правки не терялись
-    /// при переключении заметки или режима. После явного «Сохранить» (didSave) — пропускаем, без дублей.
-    private func persistIfNeeded() {
-        guard !didSave, !state.isBlocked else { return }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if let note {
-            if title != note.title || text != note.body {
-                _ = state.updateNote(id: note.id, title: title, body: text)
-            }
+    /// Пишет текущий черновик: update, если заметка уже есть (исходная или созданная этим редактором),
+    /// иначе add ровно один раз. При успехе запоминает записанное состояние как базу.
+    @discardableResult
+    private func write() -> Bool {
+        let draftTitle = title, draftText = text
+        let ok: Bool
+        if let id = persistedID {
+            ok = state.updateNote(id: id, title: draftTitle, body: draftText)
         } else {
-            _ = state.addNote(title: title, body: text)
+            let previousIDs = Set(state.sortedNotes.map(\.id))
+            ok = state.addNote(title: draftTitle, body: draftText)
+            if ok { persistedID = state.sortedNotes.first { !previousIDs.contains($0.id) }?.id }
         }
+        if ok {
+            savedTitle = draftTitle
+            savedText = draftText
+        }
+        return ok
+    }
+
+    /// Автосохранение при уходе из редактора (смена заметки/раздела), чтобы правки не терялись,
+    /// в том числе сделанные после явного «Сохранить». Без изменений относительно базы — ничего не пишем.
+    /// Переключение «Редактор/Просмотр» сюда не ведёт: редактор не исчезает.
+    private func persistIfNeeded() {
+        guard isDirty, !state.isBlocked else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        write()
     }
 
     private func delete() {
@@ -1062,37 +1129,44 @@ struct AskView: View {
             }
 
             Divider()
-            HStack(alignment: .bottom, spacing: 12) {
-                TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...6)
-                    .foregroundStyle(Theme.ink)
-                    .focused($inputFocused)
-                    .disabled(state.chatBusy)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(inputFocused ? Theme.accent : Theme.rail,
-                                      lineWidth: inputFocused ? 1.5 : 1))
-                    .accessibilityLabel("Вопрос по заметкам")
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .bottom, spacing: 12) {
+                    TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...6)
+                        .foregroundStyle(Theme.ink)
+                        .focused($inputFocused)
+                        .disabled(state.chatBusy)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(inputFocused ? Theme.accent : Theme.rail,
+                                          lineWidth: inputFocused ? 1.5 : 1))
+                        .accessibilityLabel("Вопрос по заметкам")
 
-                if state.chatBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .padding(.bottom, 12)
-                        .accessibilityLabel("ИИ отвечает")
+                    if state.chatBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.bottom, 12)
+                            .accessibilityLabel("ИИ отвечает")
+                    }
+                    Button("Очистить") { state.clearChat() }
+                        .disabled(state.chatBusy || state.chatMessages.isEmpty)
+                    Button("Спросить", action: submit)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                        .disabled(draftIsBlank || state.chatBusy)
                 }
-                Button("Очистить") { state.clearChat() }
-                    .disabled(state.chatBusy || state.chatMessages.isEmpty)
-                Button("Спросить", action: submit)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                    .disabled(draftIsBlank || state.chatBusy)
+                Text("В xAI отправляются все заметки, вопросы и ответы этой беседы; дневник и план не отправляются.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 28)
-            .padding(.vertical, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
             .background(Theme.pane)
         }
         .onReceive(NotificationCenter.default.publisher(for: .daylogAskFocus)) { notification in
@@ -1467,7 +1541,7 @@ private struct PolishConfirmSheet: View {
             Text("Причесать черновик")
                 .font(.title2.bold())
                 .foregroundStyle(Theme.ink)
-            Text("В xAI уйдёт только этот текст. Записи дневника и план не отправляются. На сервере xAI запрос не сохраняется. В дневник ничего не попадёт, пока вы не нажмёте «Записать».")
+            Text("В xAI отправляется только текст этого черновика; записи дневника и план не отправляются. Запрос отправляется с просьбой не сохранять его; условия обработки определяет xAI. В дневник текст попадёт только после «Записать».")
                 .font(.callout)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1526,7 +1600,7 @@ private struct DaySummarySheet: View {
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
             }
             HStack(alignment: .firstTextBaseline) {
-                Text("Одноразово: в дневник не записывается, на сервере xAI не сохраняется.")
+                Text("Итог не записывается в дневник. Запрос отправляется с просьбой не сохранять его; условия обработки определяет xAI.")
                     .font(.caption)
                     .foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)

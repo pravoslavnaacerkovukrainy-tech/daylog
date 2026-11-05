@@ -10,6 +10,7 @@ enum FocusTarget: Hashable {
 
 /// Какое пространство показано в окне: день (записи + план), заметочник или чат.
 enum AppMode: Hashable {
+    case organizer
     case day
     case notes
     case ask
@@ -37,11 +38,13 @@ final class AppState: ObservableObject {
     @Published private(set) var entries: [DiaryEntry] = []
     @Published private(set) var plans: [DayPlan] = []
     @Published private(set) var notes: [DiaryNote] = []
-    @Published var mode: AppMode = .day
+    @Published private(set) var projects: [DiaryProject] = []
+    @Published var organizerCaptureText = ""
+    @Published var mode: AppMode = .organizer
     @Published var chatMessages: [ChatMessage] = []
     @Published private(set) var chatBusy: Bool = false
     private var chatTask: Task<Void, Never>?
-    /// Одноразовый итог текущего дня (не сохраняется; живёт, пока открыт sheet).
+    /// Одноразовый итог текущего дня (приложение не сохраняет; живёт, пока открыт sheet).
     @Published private(set) var daySummary: String?
     @Published private(set) var summaryBusy: Bool = false
     private var summaryTask: Task<Void, Never>?
@@ -72,6 +75,21 @@ final class AppState: ObservableObject {
         entries = store.entries
         plans = store.plans
         notes = store.notes
+        projects = store.projects
+    }
+
+    @discardableResult
+    func changeOrganizer(_ message: String, _ change: () throws -> Void) -> Bool {
+        do {
+            try change()
+            refresh()
+            undo = nil
+            saved(message)
+            return true
+        } catch {
+            fail(error)
+            return false
+        }
     }
 
     var isBlocked: Bool { store.isBlocked }
@@ -403,7 +421,7 @@ final class AppState: ObservableObject {
     // MARK: Итог дня
 
     /// Спокойный итог прожитого дня по его записям, через xAI. По явному действию.
-    /// Отправляются только записи выбранного дня; план и другие дни — нет. Ничего не сохраняется.
+    /// Отправляются только записи выбранного дня; план и другие дни — нет. Ответ приложение не сохраняет.
     func summarizeDay() {
         guard !summaryBusy else { return }
         // Снимок записей дня: по нему и уходит запрос, правки во время запроса не влияют.
@@ -503,6 +521,25 @@ final class AppState: ObservableObject {
             guard let url = askSaveURL(name: "daylog-\(DiaryFormat.fileDate(Date())).md", type: mdType) else { return }
             try Data(text.utf8).write(to: url, options: .atomic)
             saved("Экспорт Markdown: \(url.lastPathComponent)")
+        } catch {
+            fail(error)
+        }
+    }
+
+    func exportMarkdownFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Экспорт в папку Markdown"
+        panel.message = "В выбранной папке будет создана новая папка с дневником, планами, заметками и JSON-архивом. Экспортируются только сохранённые данные; черновики не включены."
+        panel.prompt = "Выбрать папку"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        do {
+            let result = try store.exportMarkdownFolder(parentDirectory: directory)
+            NSWorkspace.shared.activateFileViewerSelecting([result.folderURL])
+            saved("Экспорт Markdown в папку: \(result.folderURL.lastPathComponent)")
         } catch {
             fail(error)
         }

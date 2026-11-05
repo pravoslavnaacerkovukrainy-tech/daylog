@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // MARK: - Model
 
@@ -25,7 +26,7 @@ public struct DiaryEntry: Codable, Identifiable, Equatable, Hashable {
     }
 }
 
-/// Пункт простого плана на день. Без сроков, приоритетов и напоминаний.
+/// Задача органайзера. Непустой day задаёт выбранный день работы.
 public struct DayPlan: Codable, Identifiable, Equatable, Hashable {
     public var id: UUID
     public var text: String
@@ -37,6 +38,7 @@ public struct DayPlan: Codable, Identifiable, Equatable, Hashable {
     public var completedAt: Date?
     /// Запись дневника, созданная отметкой (nil, если её удалили или план не выполнен).
     public var entryID: UUID?
+    public var organization: TaskOrganization?
 
     public var isCompleted: Bool { completedAt != nil }
 
@@ -90,11 +92,12 @@ public enum DiaryDay {
 
 /// Версионированный документ: и файл хранилища, и файл экспорта JSON.
 /// Версия 1 — только записи. Версия 2 — записи + планы и связи. Версия 3 — + заметки.
+/// Версия 4 — проекты и необязательные поля органайзера в планах.
 /// Файл без планов пишется как v1, с планами без заметок — v2 (его читает и прежняя сборка);
 /// как только появляются заметки — v3.
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     public var format: String
     public var version: Int
@@ -102,20 +105,24 @@ public struct DiaryDocument: Codable {
     public var entries: [DiaryEntry]
     public var plans: [DayPlan]
     public var notes: [DiaryNote]
+    public var projects: [DiaryProject]
 
-    public init(entries: [DiaryEntry], plans: [DayPlan] = [], notes: [DiaryNote] = [], exportedAt: Date? = nil) {
+    public init(entries: [DiaryEntry], plans: [DayPlan] = [], notes: [DiaryNote] = [], exportedAt: Date? = nil,
+                projects: [DiaryProject] = []) {
         self.format = DiaryDocument.formatName
         self.exportedAt = exportedAt
         self.entries = entries
         self.plans = plans
         self.notes = notes
+        self.projects = projects
         let needsV2 = !plans.isEmpty || entries.contains { $0.planID != nil }
         let needsV3 = !notes.isEmpty
-        self.version = needsV3 ? 3 : (needsV2 ? 2 : 1)
+        let needsV4 = !projects.isEmpty || plans.contains { $0.organization != nil || $0.day.isEmpty }
+        self.version = needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1))
     }
 
     enum CodingKeys: String, CodingKey {
-        case format, version, exportedAt, entries, plans, notes
+        case format, version, exportedAt, entries, plans, notes, projects
     }
 
     public init(from decoder: Decoder) throws {
@@ -126,6 +133,7 @@ public struct DiaryDocument: Codable {
         entries = try c.decode([DiaryEntry].self, forKey: .entries)
         plans = try c.decodeIfPresent([DayPlan].self, forKey: .plans) ?? []
         notes = try c.decodeIfPresent([DiaryNote].self, forKey: .notes) ?? []
+        projects = try c.decodeIfPresent([DiaryProject].self, forKey: .projects) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -136,6 +144,7 @@ public struct DiaryDocument: Codable {
         try c.encode(entries, forKey: .entries)
         if !plans.isEmpty { try c.encode(plans, forKey: .plans) }
         if !notes.isEmpty { try c.encode(notes, forKey: .notes) }
+        if !projects.isEmpty { try c.encode(projects, forKey: .projects) }
     }
 }
 
@@ -148,6 +157,7 @@ public enum DiaryError: Error, LocalizedError, Equatable {
     case unreadable(String)
     case unsupportedFormat(String)
     case writeFailed(String)
+    case conflictingChanges
     case planAlreadyCompleted
     case planIsCompleted
     case planNotCompleted
@@ -166,6 +176,8 @@ public enum DiaryError: Error, LocalizedError, Equatable {
             return "Файл данных в неподдерживаемом формате: \(reason)"
         case .writeFailed(let reason):
             return "Не удалось сохранить на диск, изменения не применены: \(reason)"
+        case .conflictingChanges:
+            return "Файл дневника изменён другим экземпляром приложения. Скопируйте черновик и откройте приложение заново, чтобы загрузить свежие данные."
         case .planAlreadyCompleted:
             return "Этот пункт плана уже отмечен — запись в дневнике уже есть."
         case .planIsCompleted:
@@ -284,10 +296,12 @@ public final class DiaryStore {
     public private(set) var entries: [DiaryEntry] = []
     public private(set) var plans: [DayPlan] = []
     public private(set) var notes: [DiaryNote] = []
+    public private(set) var projects: [DiaryProject] = []
     public private(set) var blockReason: String?
     public var isBlocked: Bool { blockReason != nil }
 
     private let fm = FileManager.default
+    private var loadedData: Data?
 
     public init(directory: URL) {
         self.directory = directory
@@ -306,10 +320,12 @@ public final class DiaryStore {
 
     public func load() throws {
         blockReason = nil
+        loadedData = nil
         guard fm.fileExists(atPath: fileURL.path) else {
             entries = []
             plans = []
             notes = []
+            projects = []
             return
         }
         do {
@@ -323,10 +339,13 @@ public final class DiaryStore {
             entries = DiaryStore.sorted(doc.entries)
             plans = DiaryStore.sortedPlans(doc.plans)
             notes = DiaryStore.sortNotesCanonical(doc.notes)
+            projects = doc.projects
+            loadedData = data
         } catch {
             entries = []
             plans = []
             notes = []
+            projects = []
             let diaryError = (error as? DiaryError) ?? DiaryError.unreadable(error.localizedDescription)
             blockReason = (diaryError.errorDescription ?? "ошибка чтения") + " Файл: \(fileURL.path)"
             throw diaryError
@@ -334,21 +353,45 @@ public final class DiaryStore {
     }
 
     /// Единственная точка записи: записи, планы и заметки пишутся одним атомарным файлом.
-    private func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan], notes newNotes: [DiaryNote]) throws {
+    func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan], notes newNotes: [DiaryNote],
+                 projects newProjects: [DiaryProject]? = nil) throws {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
         let sortedEntries = DiaryStore.sorted(newEntries)
         let sortedPlans = DiaryStore.sortedPlans(newPlans)
         let sortedNotes = DiaryStore.sortNotesCanonical(newNotes)
+        var projectCopy = newProjects ?? projects
+        for index in projectCopy.indices {
+            if let id = projectCopy[index].nextActionID,
+               !sortedPlans.contains(where: { $0.id == id && $0.projectID == projectCopy[index].id && !$0.isCompleted && $0.taskStatus == .ready }) {
+                projectCopy[index].nextActionID = nil
+            }
+        }
         do {
-            let data = try DiaryJSON.encoder().encode(DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes))
+            let document = DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes, projects: projectCopy)
+            let data = try DiaryJSON.encoder().encode(document)
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            let lockPath = directory.appendingPathComponent(".entries.lock").path
+            let descriptor = Darwin.open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else { throw DiaryError.writeFailed("не удалось открыть файл блокировки") }
+            defer { _ = flock(descriptor, LOCK_UN); _ = Darwin.close(descriptor) }
+            guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw DiaryError.writeFailed("другой экземпляр сохраняет данные; повторите сохранение") }
+            let diskData = fm.fileExists(atPath: fileURL.path) ? try Data(contentsOf: fileURL) : nil
+            guard diskData == loadedData else { throw DiaryError.conflictingChanges }
+            if document.version >= 4, let original = loadedData, try DiaryJSON.decode(original).version < 4 {
+                let backup = directory.appendingPathComponent("entries-before-organizer-\(UUID().uuidString).json")
+                try original.write(to: backup, options: .withoutOverwriting)
+            }
             try data.write(to: fileURL, options: .atomic)
+            loadedData = data
+        } catch let error as DiaryError {
+            throw error
         } catch {
             throw DiaryError.writeFailed(error.localizedDescription)
         }
         entries = sortedEntries
         plans = sortedPlans
         notes = sortedNotes
+        projects = projectCopy
     }
 
     /// Перегрузка для записей/планов: заметки не меняются.
@@ -690,7 +733,7 @@ public final class DiaryStore {
 
     public func exportJSON(now: Date = Date()) throws -> Data {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
-        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now)))
+        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now), projects: projects))
     }
 
     public static func parseExport(_ data: Data) throws -> [DiaryEntry] {
@@ -703,14 +746,14 @@ public final class DiaryStore {
 
     public func exportMarkdown(now: Date = Date(), calendar: Calendar = .current) throws -> String {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
-        var out = "# Ход дня — экспорт\n\n"
+        var out = "# Хаос Дня — экспорт\n\n"
         out += "Экспортировано: \(DiaryFormat.stamp(now)). Записей: \(entries.count). "
         if !plans.isEmpty { out += "Пунктов плана: \(plans.count). " }
         if !notes.isEmpty { out += "Заметок: \(notes.count). " }
         out += "Дни идут по порядку, внутри дня — по времени, от ранних к поздним.\n"
         let entryGroups = Dictionary(grouping: entries) { DiaryDay.key($0.timestamp, calendar: calendar) }
         let planGroups = Dictionary(grouping: plans) { $0.day }
-        let keys = Set(entryGroups.keys).union(planGroups.keys).sorted()
+        let keys = Set(entryGroups.keys).union(planGroups.keys.filter { !$0.isEmpty }).sorted()
         for key in keys {
             let dayDate = DiaryDay.date(key, calendar: calendar) ?? now
             out += "\n## \(DiaryFormat.day(dayDate))\n\n"
@@ -736,6 +779,7 @@ public final class DiaryStore {
                 }
             }
         }
+        if hasOrganizerData { out += "\n" + organizerMarkdown(calendar: calendar) }
         if !notes.isEmpty {
             out += "\n## Заметки\n"
             for n in sortedNotes() {

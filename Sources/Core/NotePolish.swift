@@ -14,7 +14,7 @@ public enum NotePolish {
     Сохрани все факты, имена и числа. Ничего не выдумывай и не оценивай. Язык — как у наброска.
     """
 
-    /// Тело запроса. `store: false` — xAI не сохраняет этот запрос у себя.
+    /// `store: false` просит xAI не сохранять запрос; условия обработки определяет xAI.
     public static func requestBody(draft: String) throws -> Data {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DraftPolishError.empty }

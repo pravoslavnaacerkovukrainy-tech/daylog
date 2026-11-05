@@ -1,4 +1,4 @@
-// Самопроверка ядра «Ход дня». Использует производственный DiaryStore, без копий логики.
+// Самопроверка ядра «Хаос Дня». Использует производственный DiaryStore, без копий логики.
 // Только нейтральные искусственные примеры. Запуск: ./test.sh
 import Foundation
 
@@ -184,7 +184,7 @@ test("Экспорт JSON (версия, разбор) и Markdown") {
     check(obj?["exportedAt"] != nil, "поле exportedAt")
 
     let md = try store.exportMarkdown(now: date(2030, 3, 12, 10, 0))
-    check(md.hasPrefix("# Ход дня — экспорт"), "заголовок Markdown")
+    check(md.hasPrefix("# Хаос Дня — экспорт"), "заголовок Markdown")
     check(md.contains("- **09:30** — Завтрак"), "время и текст")
     check(md.contains("- **17:05** — Встреча с соседом"), "вторая запись")
     check(md.contains("  - На чём остановился: договорились о субботе"), "контекст")
@@ -528,10 +528,10 @@ test("Документ: v2-файл читается как notes=[]") {
     let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
     check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
 }
-test("Документ: будущая версия 4 отвергается как неподдерживаемая") {
-    let v4 = #"{"format":"daylog","version":4,"entries":[],"notes":[]}"#.data(using: .utf8)!
-    let err = expectError("v4 не поддерживается") { _ = try DiaryJSON.decode(v4) }
-    check((err as? DiaryError) == .unsupportedFormat("версия 4, приложение понимает версию до 3"), "сообщение про версию: \(String(describing: err))")
+test("Документ: будущая версия 5 отвергается как неподдерживаемая") {
+    let v4 = #"{"format":"daylog","version":5,"entries":[],"notes":[]}"#.data(using: .utf8)!
+    let err = expectError("v5 не поддерживается") { _ = try DiaryJSON.decode(v4) }
+    check((err as? DiaryError) == .unsupportedFormat("версия 5, приложение понимает версию до 4"), "сообщение про версию: \(String(describing: err))")
 }
 
 // MARK: Заметки — хранилище
@@ -758,6 +758,464 @@ test("DaySummary: parse — пропускает reasoning, берёт текс�
     let data = try JSONSerialization.data(withJSONObject: fixture)
     let out = try DaySummary.parse(data)
     check(out == "Спокойный итог дня.", "извлечён именно текст сообщения, получено: \(out)")
+}
+
+// MARK: Markdown в заметках — разбор для просмотра
+
+func plain(_ s: AttributedString) -> String { String(s.characters) }
+
+test("NoteMarkdown: пустой и пробельный текст → нет блоков, без краша") {
+    check(NoteMarkdown.parse("").isEmpty, "пустая строка")
+    check(NoteMarkdown.parse("   \n\t\n\n").isEmpty, "только пробелы и переводы строк")
+}
+
+test("NoteMarkdown: заголовки H1–H6, не-заголовки") {
+    let blocks = NoteMarkdown.parse("# Один\n## Два\n### Три\n#### Четыре\n##### Пять\n###### Шесть")
+    check(blocks == [.heading(level: 1, text: "Один"), .heading(level: 2, text: "Два"),
+                     .heading(level: 3, text: "Три"), .heading(level: 4, text: "Четыре"),
+                     .heading(level: 5, text: "Пять"), .heading(level: 6, text: "Шесть")], "шесть уровней: \(blocks)")
+    check(NoteMarkdown.parse("####### семь") == [.paragraph("####### семь")], "7 решёток — абзац")
+    check(NoteMarkdown.parse("#тег без пробела") == [.paragraph("#тег без пробела")], "хештег — не заголовок")
+    check(NoteMarkdown.parse("## Итог ##") == [.heading(level: 2, text: "Итог")], "закрывающие решётки сняты")
+    check(NoteMarkdown.parse("# Язык C#") == [.heading(level: 1, text: "Язык C#")], "C# не обрезан")
+}
+
+test("NoteMarkdown: абзацы и сохранённые переносы, CRLF") {
+    check(NoteMarkdown.parse("строка1\nстрока2") == [.paragraph("строка1\nстрока2")], "перенос внутри абзаца сохранён")
+    check(NoteMarkdown.parse("а\n\nб") == [.paragraph("а"), .paragraph("б")], "пустая строка разделяет абзацы")
+    check(NoteMarkdown.parse("а\r\nб\rв") == [.paragraph("а\nб\nв")], "CRLF/CR нормализованы")
+}
+
+test("NoteMarkdown: огороженный код — буквально, с языком, пробелы целы") {
+    let src = "До\n```swift\n    let x = 1   \n\n<b>**не жирный**</b>\n\tтаб\n```\nПосле"
+    let blocks = NoteMarkdown.parse(src)
+    check(blocks.count == 3, "абзац, код, абзац: \(blocks)")
+    check(blocks[1] == .code(language: "swift", code: "    let x = 1   \n\n<b>**не жирный**</b>\n\tтаб", closed: true),
+          "содержимое кода буквально: \(blocks[1])")
+    check(NoteMarkdown.parse("~~~\n# не заголовок\n~~~") == [.code(language: nil, code: "# не заголовок", closed: true)],
+          "ограда ~~~ без языка")
+    check(NoteMarkdown.parse("````\n```\n````") == [.code(language: nil, code: "```", closed: true)],
+          "короткая ограда внутри длинной — содержимое")
+}
+
+test("NoteMarkdown: незакрытая ограда не теряет текст") {
+    let blocks = NoteMarkdown.parse("Текст\n```\nкод\n# всё ещё код")
+    check(blocks == [.paragraph("Текст"), .code(language: nil, code: "код\n# всё ещё код", closed: false)],
+          "код до конца, closed=false: \(blocks)")
+    check(NoteMarkdown.parse("```") == [.code(language: nil, code: "", closed: false)], "одна ограда без краша")
+    check(NoteMarkdown.parse("```inline``` код") == [.paragraph("```inline``` код")], "``` с ` в info — не ограда")
+}
+
+test("NoteMarkdown: списки, вложенность, нумерация, задачи только для чтения") {
+    let src = "- один\n- [ ] купить\n- [x] сделано\n  - вложенный\n    * глубже\n1. первый\n1. второй\n5) пятый"
+    guard case let .list(items)? = NoteMarkdown.parse(src).first, NoteMarkdown.parse(src).count == 1 else {
+        check(false, "ожидался один список: \(NoteMarkdown.parse(src))"); return
+    }
+    check(items.count == 8, "8 пунктов: \(items.count)")
+    check(items[0] == MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "один"), "обычный пункт")
+    check(items[1].task == false && items[1].text == "купить", "[ ] → task=false")
+    check(items[2].task == true && items[2].text == "сделано", "[x] → task=true")
+    check(items[3].level == 1 && items[3].text == "вложенный", "уровень 1")
+    check(items[4].level == 2 && items[4].text == "глубже", "уровень 2")
+    check(items[5].level == 0 && items[5].ordered && items[5].number == 1, "нумерация с 1")
+    check(items[6].number == 2, "1. 1. → 1, 2 (последовательно)")
+    check(items[7].number == 3, "далее 3")
+    check(NoteMarkdown.parse("- [X]") == [.list([MarkdownListItem(level: 0, ordered: false, number: nil, task: true, text: "")])],
+          "пустая выполненная задача")
+    check(NoteMarkdown.parse("- [ ]без пробела").first == .list([MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "[ ]без пробела")]),
+          "без пробела — не задача")
+}
+
+test("NoteMarkdown: список после абзаца, ленивое продолжение, ложные списки") {
+    check(NoteMarkdown.parse("Покупки:\n- хлеб") == [.paragraph("Покупки:"), .list([MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "хлеб")])],
+          "маркированный пункт прерывает абзац")
+    check(NoteMarkdown.parse("Было\n1984. Оруэлл") == [.paragraph("Было\n1984. Оруэлл")], "число в середине абзаца — не список")
+    check(NoteMarkdown.parse("**жирный** текст") == [.paragraph("**жирный** текст")], "** в начале — не маркер")
+    check(NoteMarkdown.parse("-5 градусов") == [.paragraph("-5 градусов")], "минус без пробела — не маркер")
+    let lazy = NoteMarkdown.parse("- пункт\nпродолжение")
+    check(lazy == [.list([MarkdownListItem(level: 0, ordered: false, number: nil, task: nil, text: "пункт\nпродолжение")])],
+          "продолжение строки пункта: \(lazy)")
+    let loose = NoteMarkdown.parse("- а\n\n- б\n\nабзац")
+    check(loose.count == 2, "пустая строка между пунктами — тот же список, потом абзац: \(loose)")
+}
+
+test("NoteMarkdown: цитаты (вложенные блоки), линии, таблица как текст") {
+    check(NoteMarkdown.parse("> мысль\n> # заголовок") == [.quote([.paragraph("мысль"), .heading(level: 1, text: "заголовок")])],
+          "цитата с блоками внутри")
+    check(NoteMarkdown.parse(">> вложенная") == [.quote([.quote([.paragraph("вложенная")])])], "вложенная цитата")
+    let deep = NoteMarkdown.parse(String(repeating: ">", count: 50) + " глубоко")
+    check(!deep.isEmpty, "очень глубокая цитата без краша")
+    check(NoteMarkdown.parse("---") == [.rule] && NoteMarkdown.parse("* * *") == [.rule] && NoteMarkdown.parse("___") == [.rule], "линии")
+    let t = NoteMarkdown.parse("| а | б |\n|---|:-:|\n| 1 | 2 |\nпосле")
+    check(t.first == .table(["| а | б |", "|---|:-:|", "| 1 | 2 |"]), "таблица — литеральные строки: \(t)")
+    check(NoteMarkdown.parse("a | b").first == .paragraph("a | b"), "просто черта — абзац")
+}
+
+test("NoteMarkdown.inline: жирный, курсив, зачёркнутый, код") {
+    let s = NoteMarkdown.inline("**ж** *к* ~~з~~ `к<о>д`")
+    check(plain(s) == "ж к з к<о>д", "разметка снята, код буквально: \(plain(s))")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }, "есть жирный")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.emphasized) == true }, "есть курсив")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.strikethrough) == true }, "есть зачёркнутый")
+    check(s.runs.contains { $0.inlinePresentationIntent?.contains(.code) == true }, "есть код")
+    check(plain(NoteMarkdown.inline("а\nб")) == "а\nб", "перенос строки сохранён")
+}
+
+test("NoteMarkdown.inline: HTML, картинки и незакрытое — литеральный текст") {
+    check(plain(NoteMarkdown.inline("<script>alert(1)</script>")) == "<script>alert(1)</script>", "HTML — текст")
+    check(plain(NoteMarkdown.inline("<img src=x onerror=y>")) == "<img src=x onerror=y>", "img-тег — текст")
+    check(plain(NoteMarkdown.inline("a `b <c>")) == "a `b <c>", "незакрытый ` и угловые скобки видны")
+    check(plain(NoteMarkdown.inline("**незакрытый")) == "**незакрытый", "незакрытый ** виден")
+    let img = NoteMarkdown.inline("![кот](https://example.com/cat.png)")
+    check(plain(img) == "![кот](https://example.com/cat.png)", "картинка — литерал: \(plain(img))")
+    check(img.runs.allSatisfy { $0.imageURL == nil }, "у картинки нет imageURL — ничего не загружается")
+    check(plain(NoteMarkdown.inline("2 < 3 > 1")) == "2 < 3 > 1", "сравнения целы")
+    check(plain(NoteMarkdown.inline("путь C:\\temp")).contains("temp"), "обратный слеш без краша")
+}
+
+test("NoteMarkdown: ссылки — только http/https, остальные сняты") {
+    let ok = NoteMarkdown.inline("[сайт](https://example.com/a)")
+    check(plain(ok) == "сайт", "текст ссылки")
+    check(ok.runs.contains { $0.link?.absoluteString == "https://example.com/a" }, "https-ссылка оставлена")
+    let auto = NoteMarkdown.inline("<https://example.com>")
+    check(auto.runs.contains { $0.link?.host == "example.com" }, "автоссылка <https://…>")
+    for bad in ["[x](javascript:alert(1))", "[x](file:///etc/hosts)", "[x](data:text/html,hi)",
+                "[x](daylog://open)", "[x](mailto:a@example.com)", "[x](relative/path)", "<javascript:alert(1)>"] {
+        let s = NoteMarkdown.inline(bad)
+        check(s.runs.allSatisfy { $0.link == nil }, "нет ссылки: \(bad)")
+        check(!plain(s).isEmpty, "текст виден: \(bad)")
+    }
+    check(NoteMarkdown.isSafeLink(URL(string: "HTTPS://Example.com")!), "регистр схемы не важен")
+    check(NoteMarkdown.isSafeLink(URL(string: "http://example.com")!), "http разрешён")
+    check(!NoteMarkdown.isSafeLink(URL(string: "http:///path")!), "без хоста — нет")
+    check(!NoteMarkdown.isSafeLink(URL(string: "ftp://example.com")!), "ftp — нет")
+}
+
+test("NoteMarkdown: большой текст разбирается без краша") {
+    var big = ""
+    for n in 0..<3000 { big += "- пункт \(n) **ж**\n" + (n % 100 == 0 ? "```\nкод\n```\n" : "") }
+    let blocks = NoteMarkdown.parse(big)
+    check(!blocks.isEmpty, "блоки есть")
+}
+
+test("Заметки: сырой Markdown сохраняется в DiaryStore байт-в-байт") {
+    let dir = freshDir("notes-markdown")
+    let s = DiaryStore(directory: dir); try s.load()
+    let md = "# Заголовок\n\n- [ ] задача\n- [x] готово\n\n```sh\n  echo \"<b>\"   \n\tтаб\n```\n> цитата\n\n[ссылка](https://example.com) **жирный**"
+    let n = try s.addNote(title: "Md", body: md)
+    check(n.body == md, "тело при добавлении без изменений")
+    let s2 = DiaryStore(directory: dir); try s2.load()
+    check(s2.notes.first?.body == md, "после перезагрузки тело совпадает")
+    let md2 = md + "\n\n```\nнезакрытая ограда"
+    _ = try s2.updateNote(id: n.id, title: "Md", body: md2)
+    let s3 = DiaryStore(directory: dir); try s3.load()
+    check(s3.notes.first?.body == md2, "после правки тело совпадает")
+    check(s3.notes.first?.title == "Md", "заголовок — обычный текст")
+}
+
+test("Markdown folder export: пустой экспорт, повторный запуск и таймзона") {
+    let parent = freshDir("md-folder-parent")
+    let dir = freshDir("md-folder-empty")
+    let store = DiaryStore(directory: dir)
+    try store.load()
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "Europe/Kyiv")!
+    let now = cal.date(from: DateComponents(year: 2024, month: 7, day: 1, hour: 3, minute: 5))!
+
+    let first = try store.exportMarkdownFolder(parentDirectory: parent, now: now, calendar: cal)
+    let readme = try String(contentsOf: first.readmeURL, encoding: .utf8)
+    check(readme.contains("Записей: 0"), "README пишет ноль записей")
+    check(readme.contains("Europe/Kyiv"), "README включает таймзону")
+    check(readme.contains("UTC+03:00"), "смещение в момент now соответствует DST")
+    let archiveDoc = try DiaryStore.parseExportDocument(try Data(contentsOf: first.archiveURL))
+    check(archiveDoc.entries == store.entries && archiveDoc.plans == store.plans && archiveDoc.notes == store.notes,
+          "полный JSON-архив совпадает с состоянием хранилища")
+
+    let second = try store.exportMarkdownFolder(parentDirectory: parent, now: now, calendar: cal)
+    check(first.folderURL != second.folderURL, "повторный экспорт создаёт новую папку")
+
+    let invalidDayDir = freshDir("md-folder-invalid-day")
+    let invalidPlan = DayPlan(id: UUID(), text: "X", day: "a/b", createdAt: now, updatedAt: now)
+    let invalidDoc = DiaryDocument(entries: [], plans: [invalidPlan], notes: [])
+    let invalidJSON = try DiaryJSON.encoder().encode(invalidDoc)
+    try invalidJSON.write(to: invalidDayDir.appendingPathComponent("entries.json"), options: .atomic)
+    let invalidStore = DiaryStore(directory: invalidDayDir)
+    try invalidStore.load()
+    let invalidExport = try invalidStore.exportMarkdownFolder(parentDirectory: parent, now: now, calendar: cal)
+    let invalidPath = invalidExport.daysDirectoryURL.appendingPathComponent("invalid-day-0.md")
+    check(FileManager.default.fileExists(atPath: invalidPath.path), "невалидный день получает ограниченное имя файла")
+    let invalidText = try String(contentsOf: invalidPath, encoding: .utf8)
+    check(invalidText.contains("a/b"), "невалидный ключ сохраняется как исходный текст")
+}
+
+test("Markdown folder export: план/заметка/битовый контроль и сборка мусора") {
+    let parent = freshDir("md-folder-parent-2")
+    let dir = freshDir("md-folder-real")
+    let store = DiaryStore(directory: dir)
+    try store.load()
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(secondsFromGMT: 0)!
+    let now = cal.date(from: DateComponents(year: 2030, month: 3, day: 10, hour: 23, minute: 30))!
+    let entryAt = cal.date(from: DateComponents(year: 2030, month: 3, day: 10, hour: 7, minute: 45))!
+    let planAt = cal.date(from: DateComponents(year: 2030, month: 3, day: 10, hour: 8, minute: 0))!
+
+    _ = try store.add(text: "Утренний кофе", context: "планировалось в 7:00", at: entryAt, now: now)
+    let plan = try store.addPlan(text: "Проверить почту", day: planAt, calendar: cal, now: now)
+    _ = try store.completePlan(id: plan.id, now: cal.date(from: DateComponents(year: 2030, month: 3, day: 10, hour: 9, minute: 15))!)
+    let noteBody = "# Вложенный заголовок\n\n```md\nне закрыта ограда\n"
+    let note = try store.addNote(title: "   ", body: noteBody)
+    let beforeSource = try Data(contentsOf: store.fileURL)
+
+    let result = try store.exportMarkdownFolder(parentDirectory: parent, now: now, calendar: cal)
+    let notePath = result.notesDirectoryURL.appendingPathComponent("\(note.id.uuidString).md")
+    let noteData = try Data(contentsOf: notePath)
+    check(noteData.suffix(note.body.utf8.count) == Data(note.body.utf8), "raw note body сохранён без преобразования")
+    let dayText = try String(contentsOf: result.daysDirectoryURL.appendingPathComponent("2030-03-10.md"), encoding: .utf8)
+    check(dayText.contains("- [x] Проверить почту"), "выполненный план отмечен в export")
+    check(dayText.contains("Проверить почту"), "текст плана сохранился в Markdown")
+    let afterSource = try Data(contentsOf: store.fileURL)
+    check(afterSource == beforeSource, "исходный файл не меняется после успешного экспорта")
+
+    let duplicateDir = freshDir("md-folder-duplicate")
+    let sameID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    let dupDoc = DiaryDocument(entries: [], plans: [], notes: [
+        DiaryNote(id: sameID, title: "A", body: "1", createdAt: now, updatedAt: now),
+        DiaryNote(id: sameID, title: "B", body: "2", createdAt: now.addingTimeInterval(1), updatedAt: now.addingTimeInterval(1))
+    ])
+    try DiaryJSON.encoder().encode(dupDoc).write(to: duplicateDir.appendingPathComponent("entries.json"), options: .atomic)
+    let dupStore = DiaryStore(directory: duplicateDir)
+    try dupStore.load()
+    let beforeDupParent = try fm.contentsOfDirectory(atPath: parent.path)
+    expectError("дубликат UUID в записи заметок") { _ = try dupStore.exportMarkdownFolder(parentDirectory: parent, now: now, calendar: cal) }
+    let afterDupParent = try fm.contentsOfDirectory(atPath: parent.path)
+    check(afterDupParent == beforeDupParent, "ошибка записи не оставляет мусор в родительской папке")
+
+    let blockedDir = freshDir("md-folder-blocked")
+    try Data("не json".utf8).write(to: blockedDir.appendingPathComponent("entries.json"), options: .atomic)
+    let blockedStore = DiaryStore(directory: blockedDir)
+    _ = try? blockedStore.load()
+    let beforeBlockedParent = try fm.contentsOfDirectory(atPath: parent.path)
+    expectError("заблокированное хранилище") { _ = try blockedStore.exportMarkdownFolder(parentDirectory: parent, now: now, calendar: cal) }
+    let afterBlockedParent = try fm.contentsOfDirectory(atPath: parent.path)
+    check(afterBlockedParent == beforeBlockedParent, "блокированное хранилище не создаёт папку")
+}
+
+test("Папочный экспорт: завершение плана, многострочный контекст, полный архив и повтор") {
+    let dir = freshDir("folder-readability-store")
+    let parent = freshDir("folder-readability-parent")
+    let store = DiaryStore(directory: dir); try store.load()
+    var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+    let at = utc.date(from: DateComponents(year: 2030, month: 3, day: 10, hour: 8, minute: 0))!
+    _ = try store.add(text: "Первая строка\n# продолжение\n```", context: "Продолжить\n# здесь", at: at, now: at)
+    let done = try store.addPlan(text: "Готовая задача", day: at, calendar: utc, now: at)
+    _ = try store.completePlan(id: done.id, now: at.addingTimeInterval(3600))
+    _ = try store.addPlan(text: "Открытая задача\n# шаг", day: at, calendar: utc, now: at)
+    _ = try store.addNote(title: "Общая заметка", body: "# Текст\n\n**сырой Markdown**", now: at)
+    let before = try Data(contentsOf: store.fileURL)
+    let result = try store.exportMarkdownFolder(parentDirectory: parent, now: at, calendar: utc)
+    let day = try String(contentsOf: result.daysDirectoryURL.appendingPathComponent("2030-03-10.md"), encoding: .utf8)
+    check(day.contains("- [x] Готовая задача\n  Выполнено: 10 марта 2030, 09:00"), "статус и фактическое время завершения")
+    check(day.contains("- [ ] Открытая задача\n  \\# шаг"), "незавершённый план и вложенное продолжение")
+    check(day.contains("- 08:00 — Первая строка\n  \\# продолжение\n  \\`\\`\\`\n  - На чём остановился: Продолжить\n    \\# здесь"), "контекст следует после всего текста записи и сохраняет переносы")
+    check(!day.contains("\n# продолжение") && !day.contains("\n```"), "текст записи не создаёт самостоятельных блоков")
+    let doc = try DiaryStore.parseExportDocument(Data(contentsOf: result.archiveURL))
+    check(doc.entries == store.entries && doc.plans == store.plans && doc.notes == store.notes, "непустой архив сохраняет все модели и связи")
+    check(doc.exportedAt == diaryNormalized(at), "дата архива соответствует экспорту")
+    let sentinel = result.folderURL.appendingPathComponent("мой-файл.txt")
+    try Data("сохранить".utf8).write(to: sentinel)
+    let firstReadme = try Data(contentsOf: result.readmeURL)
+    let second = try store.exportMarkdownFolder(parentDirectory: parent, now: at, calendar: utc)
+    check(second.folderURL != result.folderURL, "одинаковое now не приводит к повторному использованию папки")
+    check(try Data(contentsOf: sentinel) == Data("сохранить".utf8), "пользовательский файл первого экспорта сохранён")
+    check(try Data(contentsOf: result.readmeURL) == firstReadme, "первый экспорт не перезаписан")
+    check(try Data(contentsOf: store.fileURL) == before, "повторные экспорты не меняют хранилище")
+}
+
+test("Папочный экспорт: календарный день и часы используют один часовой пояс") {
+    let store = DiaryStore(directory: freshDir("folder-zone-store")); try store.load()
+    var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+    var kyiv = utc; kyiv.timeZone = TimeZone(identifier: "Europe/Kyiv")!
+    let at = utc.date(from: DateComponents(year: 2024, month: 7, day: 1, hour: 21, minute: 15))!
+    _ = try store.add(text: "После полуночи", at: at, now: at)
+    let planDay = kyiv.date(from: DateComponents(year: 2024, month: 7, day: 3, hour: 12))!
+    _ = try store.addPlan(text: "Только план", day: planDay, calendar: kyiv, now: at)
+    let result = try store.exportMarkdownFolder(parentDirectory: freshDir("folder-zone-parent"), now: at, calendar: kyiv)
+    let files = Set(try fm.contentsOfDirectory(atPath: result.daysDirectoryURL.path))
+    check(files == ["2024-07-02.md", "2024-07-03.md"], "местный день и день только с планом присутствуют")
+    let day = try String(contentsOf: result.daysDirectoryURL.appendingPathComponent("2024-07-02.md"), encoding: .utf8)
+    check(day.contains("- 00:15 — После полуночи"), "часы совпадают с местным днём")
+    let plan = try String(contentsOf: result.daysDirectoryURL.appendingPathComponent("2024-07-03.md"), encoding: .utf8)
+    check(plan.contains("- [ ] Только план"), "день без событий сохраняет план")
+}
+
+test("Папочный экспорт: некорректные ключи не конфликтуют и не выходят за папку") {
+    let dir = freshDir("folder-malformed-store")
+    let parent = freshDir("folder-malformed-parent")
+    let keys = ["a/b", "a?b", ".", "..", "2030-02-30", "2030-03-10\n", String(repeating: "z", count: 500), "/tmp/outside", "2030-03-11"]
+    let plans = keys.enumerated().map { DayPlan(text: "План \($0.offset)", day: $0.element, createdAt: day1, updatedAt: day1) }
+    try DiaryJSON.encoder().encode(DiaryDocument(entries: [], plans: plans)).write(to: dir.appendingPathComponent("entries.json"))
+    let store = DiaryStore(directory: dir); try store.load()
+    let result = try store.exportMarkdownFolder(parentDirectory: parent)
+    let files = try fm.contentsOfDirectory(atPath: result.daysDirectoryURL.path)
+    check(files.count == keys.count, "все разные ключи сохраняются без замещения")
+    check(files.contains("2030-03-11.md"), "корректная дата сохраняет имя")
+    check(!files.contains("2030-02-30.md"), "несуществующая календарная дата распознана")
+    check(!files.contains("2030-03-10\n.md"), "перевод строки не попадает в имя")
+    var text = ""
+    for file in files {
+        check(file.utf8.count < 100 && file.hasSuffix(".md"), "имя ограничено и пригодно для файла")
+        text += try String(contentsOf: result.daysDirectoryURL.appendingPathComponent(file), encoding: .utf8)
+    }
+    for index in keys.indices { check(text.contains("План \(index)"), "план \(index) не потерян") }
+    check(text.contains("дата не распознана"), "неверной дате не приписывается текущее число")
+    check(try fm.contentsOfDirectory(atPath: parent.path) == [result.folderURL.lastPathComponent], "нет файлов снаружи нового экспорта")
+    let archive = try DiaryStore.parseExportDocument(Data(contentsOf: result.archiveURL))
+    check(Set(archive.plans.map(\.day)) == Set(keys), "архив сохраняет исходные некорректные ключи")
+}
+
+test("Папочный экспорт: одинаковые опасные заголовки и исходный Markdown") {
+    let store = DiaryStore(directory: freshDir("folder-titles-store")); try store.load()
+    let title = "../[ссылка](file:///tmp/a)\r\n# <img src=x> **текст** `код`"
+    let body = "# Вложенный заголовок\n\n<literal>\n\n```swift\n  let value = 1"
+    let first = try store.addNote(title: title, body: body)
+    let second = try store.addNote(title: title, body: "второе тело")
+    let result = try store.exportMarkdownFolder(parentDirectory: freshDir("folder-titles-parent"))
+    let files = Set(try fm.contentsOfDirectory(atPath: result.notesDirectoryURL.path))
+    check(files == [first.id.uuidString + ".md", second.id.uuidString + ".md"], "файлы заметок используют разные UUID")
+    let data = try Data(contentsOf: result.notesDirectoryURL.appendingPathComponent(first.id.uuidString + ".md"))
+    check(data.suffix(first.body.utf8.count) == Data(first.body.utf8), "Markdown, HTML-текст и незакрытая ограда сохранены побайтно")
+    let text = String(decoding: data, as: UTF8.self)
+    let header = String(text.dropLast(first.body.count))
+    check(!header.contains("\r") && !header.contains("\n# <img"), "переносы заголовка не создают секции")
+    check(header.contains("&lt;img src=x&gt;") && header.contains("\\*\\*текст\\*\\*"), "метаданные читаются буквально")
+    let readme = try String(contentsOf: result.readmeURL, encoding: .utf8)
+    check(!readme.contains("<img") && !readme.contains("\r"), "оглавление нейтрализует HTML и CR")
+    check(readme.contains("Заметки/\(first.id.uuidString).md") && readme.contains("Заметки/\(second.id.uuidString).md"), "обе заметки доступны через оглавление")
+}
+
+test("Папочный экспорт: недоступная папка и ошибка внутри staging сохраняют источник") {
+    let dir = freshDir("folder-failure-store")
+    let store = DiaryStore(directory: dir); try store.load()
+    _ = try store.add(text: "Без изменений", at: day1)
+    let before = try Data(contentsOf: store.fileURL)
+    let parent = freshDir("folder-failure-parent")
+    let missing = parent.appendingPathComponent("нет-папки")
+    expectError("не создаёт отсутствующего родителя") { _ = try store.exportMarkdownFolder(parentDirectory: missing) }
+    check(!fm.fileExists(atPath: missing.path), "отсутствующая папка не создана")
+    let regularFile = parent.appendingPathComponent("файл.txt")
+    try Data("не каталог".utf8).write(to: regularFile)
+    expectError("родитель является файлом") { _ = try store.exportMarkdownFolder(parentDirectory: regularFile) }
+    check(try Data(contentsOf: regularFile) == Data("не каталог".utf8), "обычный файл не затронут")
+    let readOnly = freshDir("folder-readonly")
+    try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnly.path)
+    defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnly.path) }
+    expectError("папка только для чтения") { _ = try store.exportMarkdownFolder(parentDirectory: readOnly) }
+    check(try fm.contentsOfDirectory(atPath: readOnly.path).isEmpty, "ошибка доступа не оставляет staging")
+    check(try Data(contentsOf: store.fileURL) == before, "ошибки назначения не меняют источник")
+}
+
+test("Органайзер: ленивое обновление v3 с точной резервной копией") {
+    let dir = freshDir("organizer-migration")
+    let legacy = DiaryDocument(entries: [], plans: [DayPlan(text: "Старый план", day: "2030-03-10", createdAt: day1, updatedAt: day1)],
+                               notes: [DiaryNote(title: "Старая заметка", body: "# Исходный текст", createdAt: day1, updatedAt: day1)])
+    let original = try DiaryJSON.encoder().encode(legacy)
+    let file = dir.appendingPathComponent("entries.json")
+    try original.write(to: file)
+    let store = DiaryStore(directory: dir); try store.load()
+    check(try Data(contentsOf: file) == original, "загрузка не меняет старый файл")
+    check(store.projects.isEmpty && store.plans[0].taskArea == .personal && store.plans[0].taskStatus == .ready, "старые планы доступны без обязательных новых полей")
+    let project = try store.saveProject(title: "Отчёт", outcome: "Согласованный документ", area: .work, uncertainty: "Формат", reviewDate: day2)
+    let upgraded = try DiaryJSON.decode(Data(contentsOf: file))
+    check(upgraded.version == 4 && upgraded.projects.first?.id == project.id, "новые данные пишутся как v4")
+    check(upgraded.plans == legacy.plans && upgraded.notes == legacy.notes, "старые объекты и идентификаторы сохранены")
+    let backups = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("entries-before-organizer-") }
+    check(backups.count == 1, "создана резервная копия до перехода")
+    check(try Data(contentsOf: backups[0]) == original, "резервная копия побайтно соответствует старому файлу")
+    _ = try store.saveProject(id: project.id, title: project.title, outcome: project.outcome, area: .personal, uncertainty: "Уточнено", reviewDate: nil)
+    check(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("entries-before-organizer-") }.count == 1, "следующие сохранения не создают лишних копий миграции")
+    let reloaded = DiaryStore(directory: dir); try reloaded.load()
+    check(reloaded.projects.first?.area == .personal && reloaded.notes == legacy.notes, "повторная загрузка v4 сохраняет новый и старый контекст")
+}
+
+test("Органайзер: входящие, ожидание и три независимые даты") {
+    let store = DiaryStore(directory: freshDir("organizer-task")); try store.load()
+    let inbox = try store.addTask(text: "Уточнить требования", organization: TaskOrganization(area: .work, status: .inbox), now: day1)
+    check(inbox.day.isEmpty && inbox.taskStatus == .inbox && inbox.taskArea == .work, "быстрый ввод без обязательного дня")
+    let project = try store.saveProject(title: "Отчёт", outcome: "Отправлен согласованный отчёт", area: .work, uncertainty: "Какие данные нужны?", reviewDate: day2)
+    let due = date(2030, 3, 15, 12, 0)
+    let metadata = TaskOrganization(area: .personal, projectID: project.id, status: .waiting,
+                                    waitingFor: "Ответ коллеги", reviewDate: day2, deadline: due, details: "Три вопроса")
+    let updated = try store.updateTask(id: inbox.id, text: inbox.text, plannedDay: day1, organization: metadata)
+    check(updated.id == inbox.id && updated.projectID == project.id && updated.taskArea == .work, "разбор сохраняет идентификатор и сферу проекта")
+    check(updated.day == DiaryDay.key(day1) && updated.organization?.reviewDate == day2, "день работы и пересмотр независимы")
+    check(updated.organization?.deadline == cal.startOfDay(for: due), "срок результата задаётся отдельно")
+    check(updated.taskStatus == .waiting && updated.organization?.waitingFor == "Ответ коллеги", "ожидание сохраняет условие продолжения")
+    expectError("ожидающая задача не становится следующим шагом") { try store.setNextAction(projectID: project.id, taskID: inbox.id) }
+    var ready = metadata; ready.status = .ready
+    _ = try store.updateTask(id: inbox.id, text: inbox.text, plannedDay: nil, organization: ready)
+    try store.setNextAction(projectID: project.id, taskID: inbox.id)
+    check(store.projects.first?.nextActionID == inbox.id && store.plans.first?.day == "", "следующий шаг не требует назначения даты")
+    let completed = try store.completePlan(id: inbox.id, now: date(2030, 3, 12, 10, 15))
+    check(store.projects.first?.nextActionID == nil, "выполнение освобождает место для следующего шага")
+    check(completed.entry.planID == inbox.id && completed.plan.entryID == completed.entry.id, "задача связана с записью дневника")
+    check(completed.entry.timestamp == date(2030, 3, 12, 10, 15), "событие создаётся в фактическое время выполнения")
+    _ = try store.reopenPlan(id: inbox.id)
+    check(store.entries.isEmpty && !store.plans[0].isCompleted, "возврат задачи сохраняет прежние правила дневника")
+    expectError("чужой следующий шаг не принимается") {
+        let other = try store.addTask(text: "Личное", organization: TaskOrganization())
+        try store.setNextAction(projectID: project.id, taskID: other.id)
+    }
+}
+
+test("Органайзер: проект, следующий шаг и удаление связей") {
+    let store = DiaryStore(directory: freshDir("organizer-relations")); try store.load()
+    let project = try store.saveProject(title: "Результат", outcome: "Готовый результат", area: .work, uncertainty: "", reviewDate: nil)
+    let task = try store.addTask(text: "Первый шаг", organization: TaskOrganization(projectID: project.id))
+    try store.setNextAction(projectID: project.id, taskID: task.id)
+    expectError("открытый проект нельзя завершить с открытой задачей") { try store.setProjectArchived(id: project.id, archived: true) }
+    _ = try store.deletePlan(id: task.id)
+    check(store.projects[0].nextActionID == nil, "удаление задачи очищает следующий шаг")
+    try store.restorePlan(task)
+    _ = try store.saveProject(id: project.id, title: project.title, outcome: project.outcome, area: .personal, uncertainty: "", reviewDate: nil)
+    check(store.plans[0].taskArea == .personal, "изменение сферы проекта обновляет его задачи")
+    try store.deleteProject(id: project.id)
+    check(store.plans.count == 1 && store.plans[0].projectID == nil, "удаление проекта сохраняет задачу без висячей ссылки")
+    let archived = try store.saveProject(title: "Завершённый", outcome: "Результат", area: .personal, uncertainty: "", reviewDate: nil)
+    try store.setProjectArchived(id: archived.id, archived: true)
+    expectError("нельзя добавить задачу в завершённый проект") { _ = try store.addTask(text: "Новая", organization: TaskOrganization(projectID: archived.id)) }
+}
+
+test("Органайзер: экспорт всех метаданных и проектов") {
+    let store = DiaryStore(directory: freshDir("organizer-export")); try store.load()
+    let project = try store.saveProject(title: "Проект", outcome: "Результат", area: .work, uncertainty: "Уточнить формат", reviewDate: day2)
+    let task = try store.addTask(text: "Без дня", organization: TaskOrganization(projectID: project.id, status: .waiting,
+                               waitingFor: "Ответ", reviewDate: day2, deadline: day1, details: "Материалы"))
+    let archive = try DiaryStore.parseExportDocument(store.exportJSON())
+    check(archive.projects == store.projects && archive.plans.first == task, "JSON хранит все поля органайзера")
+    let result = try store.exportMarkdownFolder(parentDirectory: freshDir("organizer-export-parent"))
+    let folderArchive = try DiaryStore.parseExportDocument(Data(contentsOf: result.archiveURL))
+    check(folderArchive.projects == store.projects && folderArchive.plans == store.plans, "папочный архив включает проекты и новые задачи")
+    check(try fm.contentsOfDirectory(atPath: result.daysDirectoryURL.path).isEmpty, "задаче без дня не выдумывается дата")
+    let human = try String(contentsOf: result.folderURL.appendingPathComponent("Органайзер.md"), encoding: .utf8)
+    check(human.contains("Уточнить формат") && human.contains("Ожидаю") && human.contains("Ответ"), "ожидания и неопределённость читаются в Markdown")
+    let single = try store.exportMarkdown()
+    check(single.contains("Органайзер") && single.contains("Без дня") && single.contains("Результат"), "единый Markdown также включает новые данные")
+}
+
+test("Хранилище: два экземпляра не перезаписывают свежие данные") {
+    let dir = freshDir("organizer-conflict")
+    let first = DiaryStore(directory: dir), second = DiaryStore(directory: dir)
+    try first.load(); try second.load()
+    _ = try first.addTask(text: "Первый", organization: TaskOrganization(status: .inbox))
+    let source = try Data(contentsOf: first.fileURL)
+    let error = expectError("устаревший экземпляр отклоняет запись") { _ = try second.addTask(text: "Второй", organization: TaskOrganization()) }
+    check((error as? DiaryError) == .conflictingChanges, "причина конфликта доступна пользователю")
+    check(second.plans.isEmpty, "после конфликта память не меняется")
+    check(try Data(contentsOf: first.fileURL) == source, "свежий файл не потерян")
+    try second.load()
+    _ = try second.addTask(text: "Второй", organization: TaskOrganization())
+    let reloaded = DiaryStore(directory: dir); try reloaded.load()
+    check(reloaded.plans.count == 2, "после загрузки свежей версии обе задачи сохранены")
 }
 
 print("\nПроверок: \(checks), ошибок: \(failures)")

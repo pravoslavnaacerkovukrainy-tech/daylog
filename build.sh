@@ -1,5 +1,5 @@
 #!/bin/bash
-# Сборка «Ход дня» без Xcode: swiftc из Command Line Tools.
+# Сборка «Хаос Дня» без Xcode: swiftc из Command Line Tools.
 #
 # Папка проекта лежит в ~/Documents, где FileProvider может в любой момент добавить
 # com.apple.FinderInfo на бандл — из-за этого codesign отказывался подписывать.
@@ -12,14 +12,25 @@ PROJECT="$(pwd)"
 
 ARCH="$(uname -m)"
 TARGET="${ARCH}-apple-macos14.0"
-SDK="$(xcrun --show-sdk-path --sdk macosx)"
+SDK="${DAYLOG_SDK_PATH:-$(xcrun --show-sdk-path --sdk macosx)}"
+
+# Некоторые CLT поставляются с SDK 27.2 без плагина SwiftUIMacros.
+# Если установлен совместимый SDK, используем его для обычных @State.
+SWIFT_BIN="$(dirname "$(xcrun --find swiftc)")"
+SWIFTUI_INTERFACE="$SDK/System/Library/Frameworks/SwiftUICore.framework/Modules/SwiftUICore.swiftmodule/arm64e-apple-macos.swiftinterface"
+COMPATIBLE_SDK="$(dirname "$SDK")/MacOSX26.5.sdk"
+if [[ -z "${DAYLOG_SDK_PATH:-}" && -d "$COMPATIBLE_SDK" && ! -f "$SWIFT_BIN/../lib/swift/host/plugins/libSwiftUIMacros.dylib" ]] &&
+   grep -q 'public macro State' "$SWIFTUI_INTERFACE" 2>/dev/null; then
+  SDK="$COMPATIBLE_SDK"
+fi
+echo "→ SDK: $SDK"
 
 STAGE="$(mktemp -d "${TMPDIR:-/private/tmp}/daylog-build.XXXXXX")"
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT
 
-APP="$STAGE/Daylog.app"
-ZIP="$STAGE/Daylog-Mac.zip"
+APP="$STAGE/Хаос Дня.app"
+ZIP="$STAGE/Chaos-Day-Mac.zip"
 CHECK="$STAGE/check"
 
 echo "→ Временная папка сборки: $STAGE"
@@ -61,20 +72,20 @@ ditto -c -k --keepParent --norsrc --noextattr --noacl "$APP" "$ZIP"
 
 echo "→ Проверка распакованной копии (вне Documents)…"
 ditto -x -k "$ZIP" "$CHECK"
-codesign --verify --strict --verbose=2 "$CHECK/Daylog.app"
-test -x "$CHECK/Daylog.app/Contents/MacOS/Daylog"
+codesign --verify --strict --verbose=2 "$CHECK/Хаос Дня.app"
+test -x "$CHECK/Хаос Дня.app/Contents/MacOS/Daylog"
 
 echo "→ Копирование результатов в build/…"
 mkdir -p "$PROJECT/build"
-cat "$ZIP" > "$PROJECT/build/Daylog-Mac.zip"
+cat "$ZIP" > "$PROJECT/build/Chaos-Day-Mac.zip"
 # Удобная запускаемая копия. FileProvider в Documents может снова добавить ей
 # FinderInfo — проверенным результатом считается ZIP, а не эта копия.
-rm -rf "$PROJECT/build/Daylog.app"
-ditto --norsrc --noextattr --noacl "$APP" "$PROJECT/build/Daylog.app"
+rm -rf "$PROJECT/build/Хаос Дня.app"
+ditto --norsrc --noextattr --noacl "$APP" "$PROJECT/build/Хаос Дня.app"
 
 echo
 echo "Готово."
-echo "  Проверенный подписанный архив: $PROJECT/build/Daylog-Mac.zip"
-echo "  Запускаемая копия (для удобства): $PROJECT/build/Daylog.app"
-echo "  Запуск: open \"$PROJECT/build/Daylog.app\""
-echo "  Тестовые данные: DAYLOG_DATA_DIR=/tmp/daylog-demo \"$PROJECT/build/Daylog.app/Contents/MacOS/Daylog\""
+echo "  Проверенный подписанный архив: $PROJECT/build/Chaos-Day-Mac.zip"
+echo "  Запускаемая копия (для удобства): $PROJECT/build/Хаос Дня.app"
+echo "  Запуск: open \"$PROJECT/build/Хаос Дня.app\""
+echo "  Тестовые данные: DAYLOG_DATA_DIR=/tmp/daylog-demo \"$PROJECT/build/Хаос Дня.app/Contents/MacOS/Daylog\""

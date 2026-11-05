@@ -14,7 +14,7 @@ public enum DraftPolish {
     Без кавычек, списков и пояснений.
     """
 
-    /// Тело запроса. `store: false` — xAI не сохраняет этот запрос у себя.
+    /// `store: false` просит xAI не сохранять запрос; условия обработки определяет xAI.
     public static func requestBody(draft: String) throws -> Data {
         let text = normalizeInput(draft)
         guard !text.isEmpty else { throw DraftPolishError.empty }

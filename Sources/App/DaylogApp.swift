@@ -23,7 +23,7 @@ struct DaylogApp: App {
     @StateObject private var state = AppState()
 
     var body: some Scene {
-        Window("Ход дня", id: "main") {
+        Window("Хаос Дня", id: "main") {
             ContentView()
                 .environmentObject(state)
         }
@@ -31,7 +31,7 @@ struct DaylogApp: App {
         .windowToolbarStyle(.unified)
         .commands { DaylogCommands(state: state) }
 
-        MenuBarExtra("Ход дня", systemImage: "clock") {
+        MenuBarExtra("Хаос Дня", systemImage: "clock") {
             MenuBarContent()
                 .environmentObject(state)
         }
@@ -70,6 +70,7 @@ struct DaylogCommands: Commands {
             Button("Экспорт в JSON…") { state.exportJSON() }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
             Button("Экспорт в Markdown…") { state.exportMarkdown() }
+            Button("Экспорт в папку Markdown…") { state.exportMarkdownFolder() }
             Divider()
             Button("Показать файл данных в Finder") { state.revealDataFile() }
         }
@@ -129,13 +130,17 @@ struct MenuBarContent: View {
             showWindow()
             NotificationCenter.default.post(name: .daylogNewNote, object: state)
         }
-        Button("Открыть «Ход дня»") {
+        Button("Открыть «Хаос Дня»") {
             showWindow()
         }
         Divider()
         Button("Экспорт в Markdown…") {
             showWindow()
             state.exportMarkdown()
+        }
+        Button("Экспорт в папку Markdown…") {
+            showWindow()
+            state.exportMarkdownFolder()
         }
         Divider()
         Button("Выйти") { NSApp.terminate(nil) }
