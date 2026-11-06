@@ -318,10 +318,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// «Оформить» в редакторе заметки: набросок → заголовок и тело через xAI.
+    /// «Оформить» в редакторе заметки: набросок → заголовок и тело через QwenCloud.
     /// Заметку всегда можно сохранить и без сети — ошибка ИИ не блокирует редактирование.
     func polishNote(draft: String) async -> (title: String, body: String)? {
-        guard let key = XAIKeyStore.load() else {
+        guard let key = QwenKeyStore.resolve() else {
             showError(DraftPolishError.noKey.localizedDescription)
             return nil
         }
@@ -346,7 +346,7 @@ final class AppState: ObservableObject {
         let notesSnapshot = store.notes
         chatBusy = true
         chatTask = Task { @MainActor in
-            guard let key = XAIKeyStore.load() else {
+            guard let key = QwenKeyStore.resolve() else {
                 showError(DraftPolishError.noKey.localizedDescription)
                 chatBusy = false
                 return
@@ -385,7 +385,7 @@ final class AppState: ObservableObject {
 
     // MARK: Итог дня
 
-    /// Спокойный итог прожитого дня по его записям, через xAI. По явному действию.
+    /// Спокойный итог прожитого дня по его записям, через QwenCloud. По явному действию.
     /// Отправляются только записи выбранного дня; план и другие дни — нет. Ответ приложение не сохраняет.
     func summarizeDay() {
         guard !summaryBusy else { return }
@@ -397,7 +397,7 @@ final class AppState: ObservableObject {
         }
         summaryBusy = true
         summaryTask = Task { @MainActor in
-            guard let key = XAIKeyStore.load() else {
+            guard let key = QwenKeyStore.resolve() else {
                 showError(DraftPolishError.noKey.localizedDescription)
                 summaryBusy = false
                 return

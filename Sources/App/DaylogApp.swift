@@ -123,7 +123,7 @@ struct DaylogCommands: Commands {
             Divider()
             Button("Причесать черновик") { state.requestPolish() }
                 .keyboardShortcut(.return, modifiers: [.command, .option])
-            Button("Ключ xAI…") { state.keySheetIntent = .settings }
+            Button("Ключ QwenCloud…") { state.keySheetIntent = .settings }
         }
     }
 }

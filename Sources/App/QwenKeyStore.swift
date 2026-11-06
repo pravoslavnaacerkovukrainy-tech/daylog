@@ -1,15 +1,15 @@
 import Foundation
 import Security
 
-/// Ключ xAI в Связке ключей этого Mac. В файл дневника не пишется.
-enum XAIKeyStore {
-    static let service = "local.daylog.app.xai"
+/// Ключ QwenCloud в Связке ключей этого Mac. В файл дневника не пишется.
+enum QwenKeyStore {
+    static let service = "local.daylog.app.qwencloud"
     static let account = "api-key"
 
-    /// Сначала Связка ключей, затем переменная окружения запуска `XAI_API_KEY`.
+    /// Сначала Связка ключей, затем переменная окружения запуска `QWENCLOUD_API_KEY`.
     static func resolve() -> String? {
         if let saved = load() { return saved }
-        let env = ProcessInfo.processInfo.environment["XAI_API_KEY"]?
+        let env = ProcessInfo.processInfo.environment["QWENCLOUD_API_KEY"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return env.isEmpty ? nil : env
     }
@@ -45,10 +45,10 @@ enum XAIKeyStore {
             add[kSecValueData as String] = data
             add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let status = SecItemAdd(add as CFDictionary, nil)
-            guard status == errSecSuccess else { throw XAIKeyStoreError.status(status) }
+            guard status == errSecSuccess else { throw QwenKeyStoreError.status(status) }
             return
         }
-        guard update == errSecSuccess else { throw XAIKeyStoreError.status(update) }
+        guard update == errSecSuccess else { throw QwenKeyStoreError.status(update) }
     }
 
     static func delete() throws {
@@ -59,12 +59,12 @@ enum XAIKeyStore {
         ]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw XAIKeyStoreError.status(status)
+            throw QwenKeyStoreError.status(status)
         }
     }
 }
 
-enum XAIKeyStoreError: Error, LocalizedError {
+enum QwenKeyStoreError: Error, LocalizedError {
     case status(OSStatus)
 
     var errorDescription: String? {

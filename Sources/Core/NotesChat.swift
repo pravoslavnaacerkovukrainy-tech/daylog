@@ -28,8 +28,8 @@ public struct ChatMessage: Identifiable, Equatable {
 }
 
 public enum NotesChat {
-    public static let model = "grok-4.7"
-    public static let endpoint = URL(string: "https://api.x.ai/v1/responses")!
+    public static let model = QwenChat.model
+    public static var endpoint: URL { QwenChat.endpoint }
     public static let maxContextCharacters = 120_000
 
     public static let systemPrompt = """
@@ -78,8 +78,9 @@ public enum NotesChat {
     ) throws -> Data {
         let payload: [String: Any] = [
             "model": model,
-            "store": false,
-            "input": try buildInput(notes: notes, history: history, question: question),
+            "enable_thinking": false,
+            "max_tokens": 4096,
+            "messages": try buildInput(notes: notes, history: history, question: question),
         ]
         return try JSONSerialization.data(withJSONObject: payload)
     }
@@ -100,7 +101,7 @@ public enum NotesChat {
     }
 
     public static func parse(_ data: Data) throws -> (answer: String, sources: [Int]) {
-        let text = try XAIResponses.extractText(data)
+        let text = try QwenChat.extractText(data)
         let markerPattern = #"^[\t ]*(?:⟦[\t ]*источники[\t ]*:[^\r\n]*?⟧|\[[\t ]*источники[\t ]*:[^\r\n]*?\])[\t ]*$"#
         let markerRegex = try NSRegularExpression(
             pattern: markerPattern,
@@ -172,7 +173,7 @@ public struct NotesChatClient {
         }
         guard let http = response as? HTTPURLResponse else { throw DraftPolishError.badResponse }
         guard (200 ... 299).contains(http.statusCode) else {
-            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data))
+            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data).replacingOccurrences(of: trimmed, with: "[ключ скрыт]"))
         }
         return try NotesChat.parse(data)
     }

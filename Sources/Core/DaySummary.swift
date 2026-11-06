@@ -1,11 +1,11 @@
 import Foundation
 
-/// Одноразовый спокойный итог прожитого дня через xAI Responses API.
+/// Одноразовый спокойный итог прожитого дня через QwenCloud Chat Completions API.
 /// В запрос попадают только записи выбранного дня. План и другие дни не передаются.
 /// Ответ не сохраняется приложением и не записывается в `entries.json`.
 public enum DaySummary {
-    public static let model = "grok-4.7"
-    public static let endpoint = URL(string: "https://api.x.ai/v1/responses")!
+    public static let model = QwenChat.model
+    public static var endpoint: URL { QwenChat.endpoint }
     public static let maxContextCharacters = 120_000
 
     public static let systemPrompt = """
@@ -43,12 +43,13 @@ public enum DaySummary {
         ]
     }
 
-    /// `store: false` просит xAI не сохранять запрос; условия обработки определяет xAI.
+    /// Обычный запрос Chat Completions; условия обработки определяет QwenCloud.
     public static func requestBody(entries: [DiaryEntry]) throws -> Data {
         let payload: [String: Any] = [
             "model": model,
-            "store": false,
-            "input": try buildInput(entries: entries),
+            "enable_thinking": false,
+            "max_tokens": 4096,
+            "messages": try buildInput(entries: entries),
         ]
         return try JSONSerialization.data(withJSONObject: payload)
     }
@@ -63,9 +64,9 @@ public enum DaySummary {
         return req
     }
 
-    /// Достаёт текст итога из ответа Responses API и пропускает блок рассуждения.
+    /// Достаёт текст итога из ответа Chat Completions API и пропускает блок рассуждения.
     public static func parse(_ data: Data) throws -> String {
-        try XAIResponses.extractText(data) { XAIResponses.stripCodeFence($0) }
+        try QwenChat.extractText(data) { QwenChat.stripCodeFence($0) }
     }
 }
 
@@ -89,7 +90,7 @@ public struct DaySummaryClient {
         }
         guard let http = response as? HTTPURLResponse else { throw DraftPolishError.badResponse }
         guard (200 ... 299).contains(http.statusCode) else {
-            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data))
+            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data).replacingOccurrences(of: trimmed, with: "[ключ скрыт]"))
         }
         return try DaySummary.parse(data)
     }

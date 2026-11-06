@@ -464,17 +464,17 @@ test("Сбой записи: ни план, ни записи не меняют�
 }
 
 test("Причёсывание: в запрос попадает только черновик, ключ остаётся в заголовке") {
-    let req = try DraftPolish.request(draft: "  кран течёт, звонил сантехнику  ", apiKey: "XAI-SECRET-KEY")
+    let req = try DraftPolish.request(draft: "  кран течёт, звонил сантехнику  ", apiKey: "QWEN-TEST-KEY")
     let body = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
-    check(body["model"] as? String == "grok-4.7", "модель")
-    check(body["store"] as? Bool == false, "запрос не сохраняется на сервере")
-    let input = body["input"] as! [[String: Any]]
+    check(body["model"] as? String == "qwen3.8-flash", "модель")
+    check(body["enable_thinking"] as? Bool == false, "режим рассуждений выключен")
+    let input = body["messages"] as! [[String: Any]]
     check(input.count == 2, "system и один user")
     check(input[1]["content"] as? String == "кран течёт, звонил сантехнику", "в user только черновик")
     let raw = String(data: req.httpBody!, encoding: .utf8)!
-    check(!raw.contains("XAI-SECRET-KEY"), "ключа нет в теле")
+    check(!raw.contains("QWEN-TEST-KEY"), "ключа нет в теле")
     check(!raw.contains("план"), "в теле нет постороннего дневника")
-    check(req.value(forHTTPHeaderField: "Authorization") == "Bearer XAI-SECRET-KEY", "ключ в заголовке")
+    check(req.value(forHTTPHeaderField: "Authorization") == "Bearer QWEN-TEST-KEY", "ключ в заголовке")
     check(req.timeoutInterval == 90, "таймаут 90 с")
 }
 
@@ -485,10 +485,7 @@ test("Причёсывание: пустой и слишком длинный ч
 
 test("Причёсывание: ответ — фраза, рассуждение модели отбрасывается") {
     let json = """
-    {"output":[
-      {"type":"reasoning","encrypted_content":"SECRET-REASONING"},
-      {"type":"message","content":[{"type":"output_text","text":"«Позвонил сантехнику, кран больше не течёт.»"}]}
-    ]}
+    {"choices":[{"message":{"role":"assistant","reasoning_content":"SECRET-REASONING","content":"«Позвонил сантехнику, кран больше не течёт.»"},"finish_reason":"stop"}]}
     """.data(using: .utf8)!
     let line = try DraftPolish.parse(json)
     check(line == "Позвонил сантехнику, кран больше не течёт.", "фраза без кавычек: \(line)")
@@ -496,15 +493,15 @@ test("Причёсывание: ответ — фраза, рассуждени�
 }
 
 test("Причёсывание: запасные формы ответа и ошибка без текста") {
-    let direct = #"{"output_text":"Купил хлеб"}"#.data(using: .utf8)!
+    let direct = #"{"choices":[{"message":{"role":"assistant","content":"Купил хлеб","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     check(try DraftPolish.parse(direct) == "Купил хлеб", "output_text")
-    let fenced = #"{"output":[{"content":"```\nЗапись: «Закрыл кран»\nПояснение: готово\n```"}]}"#.data(using: .utf8)!
+    let fenced = #"{"choices":[{"message":{"role":"assistant","content":"```\nЗапись: «Закрыл кран»\nПояснение: готово\n```","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     check(try DraftPolish.parse(fenced) == "Закрыл кран", "первая строка без подписи: \(try DraftPolish.parse(fenced))")
-    expectError("пустой output") { _ = try DraftPolish.parse(#"{"output":[]}"#.data(using: .utf8)!) }
+    expectError("пустой output") { _ = try DraftPolish.parse(#"{"choices":[]}"#.data(using: .utf8)!) }
     let err = #"{"error":{"message":"Incorrect API key"}}"#.data(using: .utf8)!
     check(DraftPolish.errorMessage(from: err) == "Incorrect API key", "текст ошибки API")
     let xaiError = #"{"code":"invalid-argument","error":"Incorrect API key provided."}"#.data(using: .utf8)!
-    check(DraftPolish.errorMessage(from: xaiError) == "Incorrect API key provided.", "ошибка xAI строкой в поле error")
+    check(DraftPolish.errorMessage(from: xaiError) == "Incorrect API key provided.", "ошибка API строкой в поле error")
     let blankError = #"{"code":"invalid-argument","error":"  "}"#.data(using: .utf8)!
     check(DraftPolish.errorMessage(from: blankError).isEmpty, "пустой текст ошибки не показывается")
     let http = DraftPolishError.http(400, "Incorrect API key provided.")
@@ -583,28 +580,60 @@ test("Заметки: мутация на заблокированном хра�
     expectError("add на блоке") { _ = try s.addNote(title: "x", body: "y") }
 }
 
-// MARK: xAI — общий разбор ответа
+// MARK: QwenCloud — общий разбор ответа
 
-test("XAIResponses: извлечение текста и снятие ограды") {
-    let json = #"{"output":[{"type":"reasoning"},{"type":"message","content":[{"type":"output_text","text":"Привет"}]}]}"#.data(using: .utf8)!
-    check(try XAIResponses.extractText(json) == "Привет", "текст из message")
-    check(XAIResponses.stripCodeFence("```\nсодержимое\n```") == "содержимое", "ограда снята")
-    expectError("пустой output") { _ = try XAIResponses.extractText(#"{"output":[]}"#.data(using: .utf8)!) }
+test("QwenChat: извлечение текста и снятие ограды") {
+    let json = #"{"choices":[{"message":{"role":"assistant","content":"Привет","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
+    check(try QwenChat.extractText(json) == "Привет", "текст из message")
+    check(QwenChat.stripCodeFence("```\nсодержимое\n```") == "содержимое", "ограда снята")
+    expectError("пустой output") { _ = try QwenChat.extractText(#"{"choices":[]}"#.data(using: .utf8)!) }
 }
 
 // MARK: NotePolish — набросок в заголовок и заметку
+
+test("QwenCloud: all four features use Chat Completions and bounded output") {
+    let note = DiaryNote(title: "Fixture", body: "Only this note", createdAt: Date(), updatedAt: Date())
+    let requests = [
+        try DraftPolish.request(draft: "Draft only", apiKey: "TEST-QWEN-KEY"),
+        try NotePolish.request(draft: "Note only", apiKey: "TEST-QWEN-KEY"),
+        try NotesChat.request(notes: [note], history: [], question: "Question", apiKey: "TEST-QWEN-KEY"),
+        try DaySummary.request(entries: [DiaryEntry(text: "Day only", context: nil, timestamp: Date(), createdAt: Date(), updatedAt: Date())], apiKey: "TEST-QWEN-KEY"),
+    ]
+    for request in requests {
+        check(request.url?.host?.hasSuffix(".maas.qwencloudapi.com") == true, "QwenCloud host")
+        check(request.url?.path == "/compatible-mode/v1/chat/completions", "Chat Completions path")
+        let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+        check(body["messages"] is [[String: Any]] && body["input"] == nil, "messages protocol")
+        check(body["enable_thinking"] as? Bool == false && body["max_tokens"] as? Int == 4096, "bounded answer without thinking")
+        check(body["store"] == nil && body["model"] as? String == "qwen3.8-flash", "Qwen model and supported options")
+        check(request.value(forHTTPHeaderField: "Authorization") == "Bearer TEST-QWEN-KEY", "key only in header")
+        check(!String(data: request.httpBody!, encoding: .utf8)!.contains("TEST-QWEN-KEY"), "key absent from payload")
+    }
+    for region in QwenRegion.allCases {
+        check(region.endpoint.scheme == "https" && region.endpoint.host == "\(region.rawValue).maas.qwencloudapi.com", "region uses an official HTTPS endpoint")
+    }
+}
+
+test("QwenCloud: incomplete or reasoning-only answers do not replace a draft") {
+    let truncated = #"{"choices":[{"message":{"content":"Partial"},"finish_reason":"length"}]}"#.data(using: .utf8)!
+    let error = expectError("truncated response rejected") { _ = try NotePolish.parse(truncated) }
+    check(error as? DraftPolishError == .truncatedResponse, "specific truncation error")
+    let reasoning = #"{"choices":[{"message":{"content":null,"reasoning_content":"PRIVATE"}}]}"#.data(using: .utf8)!
+    expectError("reasoning is not an answer") { _ = try QwenChat.extractText(reasoning) }
+    expectError("malformed response rejected") { _ = try QwenChat.extractText(Data("not json".utf8)) }
+}
 
 test("NotePolish: лимит и пустой набросок") {
     expectError("пустой") { _ = try NotePolish.requestBody(draft: "  ") }
     expectError("длинный") { _ = try NotePolish.requestBody(draft: String(repeating: "а", count: 6001)) }
 }
 test("NotePolish: чистый JSON, JSON в ограде, мусор → фолбэк") {
-    let clean = #"{"output":[{"content":"{\"title\":\"Звонок\",\"body\":\"Позвонить технику про СЗІ\"}"}]}"#.data(using: .utf8)!
+    let clean = #"{"choices":[{"message":{"role":"assistant","content":"{\"title\":\"Звонок\",\"body\":\"Позвонить технику про СЗІ\"}","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     let r1 = try NotePolish.parse(clean)
     check(r1.title == "Звонок" && r1.body.contains("технику"), "чистый JSON: \(r1)")
-    let fenced = #"{"output_text":"```json\n{\"title\":\"Т\",\"body\":\"Тело\"}\n```"}"#.data(using: .utf8)!
+    let fenced = #"{"choices":[{"message":{"role":"assistant","content":"```json\n{\"title\":\"Т\",\"body\":\"Тело\"}\n```","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     check(try NotePolish.parse(fenced).title == "Т", "JSON в ограде")
-    let garbage = #"{"output_text":"Первая строка\nвторая строка"}"#.data(using: .utf8)!
+    let garbage = #"{"choices":[{"message":{"role":"assistant","content":"Первая строка\nвторая строка","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     let r3 = try NotePolish.parse(garbage)
     check(r3.title == "Первая строка" && r3.body.contains("вторая"), "фолбэк: title из первой строки, \(r3)")
 }
@@ -636,7 +665,7 @@ test("JSON-экспорт включает заметки") {
 // MARK: Заметки — фиксы по код-ревью
 
 test("NotePolish: пустой результат после очистки — ошибка, не пустая заметка") {
-    let emptyFence = #"{"output_text":"```\n\n```"}"#.data(using: .utf8)!
+    let emptyFence = #"{"choices":[{"message":{"role":"assistant","content":"```\n\n```","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     expectError("пустая ограда → ошибка, а не («», «»)") { _ = try NotePolish.parse(emptyFence) }
 }
 
@@ -680,15 +709,15 @@ test("NotesChat: переразмер контекста → contextTooLarge") {
 // MARK: Чат по заметкам — разбор ответа и источников
 
 test("NotesChat.parse: ответ + источники, 'нет', отсутствие строки, пустой") {
-    let withSrc = #"{"output_text":"Ответ про кран.\n⟦источники: 1, 3⟧"}"#.data(using: .utf8)!
+    let withSrc = #"{"choices":[{"message":{"role":"assistant","content":"Ответ про кран.\n⟦источники: 1, 3⟧","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     let r = try NotesChat.parse(withSrc)
     check(r.answer == "Ответ про кран." && r.sources == [1, 3], "ответ без строки, источники [1,3]: \(r)")
-    let none = #"{"output_text":"Не нашёл в заметках.\n⟦источники: нет⟧"}"#.data(using: .utf8)!
+    let none = #"{"choices":[{"message":{"role":"assistant","content":"Не нашёл в заметках.\n⟦источники: нет⟧","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     check(try NotesChat.parse(none).sources.isEmpty, "'нет' → пусто")
-    let noLine = #"{"output_text":"Просто ответ"}"#.data(using: .utf8)!
+    let noLine = #"{"choices":[{"message":{"role":"assistant","content":"Просто ответ","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     let r2 = try NotesChat.parse(noLine)
     check(r2.sources.isEmpty && r2.answer == "Просто ответ", "нет строки → фолбэк")
-    expectError("пустой ответ") { _ = try NotesChat.parse(#"{"output_text":"⟦источники: 1⟧"}"#.data(using: .utf8)!) }
+    expectError("пустой ответ") { _ = try NotesChat.parse(#"{"choices":[{"message":{"role":"assistant","content":"⟦источники: 1⟧","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!) }
 }
 test("NotesChat.resolveSources: отбрасывает вне диапазона, дедуп, порядок") {
     check(NotesChat.resolveSources([1, 3, 5, 3], noteCount: 3) == [1, 3], "5 вне, дубль 3 убран")
@@ -744,22 +773,21 @@ test("DaySummary: слишком большой контекст → .contextToo
     else { check(false, "ожидался .contextTooLarge, получено \(String(describing: err))") }
 }
 
-test("DaySummary: requestBody — store:false и роли") {
+test("DaySummary: requestBody — messages и роли") {
     let e = DiaryEntry(text: "Дело", context: nil, timestamp: date(2030, 3, 10, 8, 0),
                        createdAt: date(2030, 3, 10, 8, 0), updatedAt: date(2030, 3, 10, 8, 0))
     let data = try DaySummary.requestBody(entries: [e])
     let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-    check((json["store"] as? Bool) == false, "store:false")
-    check((json["model"] as? String) == DaySummary.model, "модель grok-4.7")
-    let input = json["input"] as! [[String: Any]]
+    check((json["enable_thinking"] as? Bool) == false, "enable_thinking:false")
+    check((json["model"] as? String) == DaySummary.model, "модель qwen3.8-flash")
+    let input = json["messages"] as! [[String: Any]]
     check(input.first?["role"] as? String == "system", "первый — system")
     check(input.last?["role"] as? String == "user", "последний — user")
 }
 
 test("DaySummary: parse — пропускает reasoning, берёт текст") {
-    let fixture: [String: Any] = ["output": [
-        ["type": "reasoning", "content": "размышления"],
-        ["type": "message", "content": [["type": "output_text", "text": "Спокойный итог дня."]]],
+    let fixture: [String: Any] = ["choices": [
+        ["message": ["role": "assistant", "reasoning_content": "private reasoning", "content": "Спокойный итог дня."], "finish_reason": "stop"],
     ]]
     let data = try JSONSerialization.data(withJSONObject: fixture)
     let out = try DaySummary.parse(data)

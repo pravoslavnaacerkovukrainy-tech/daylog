@@ -1,10 +1,10 @@
 import Foundation
 
-/// Причёсывание одного черновика через xAI Responses API.
+/// Причёсывание одного черновика через QwenCloud Chat Completions API.
 /// В запрос попадает только переданный текст. Дневник и план сюда не передаются.
 public enum DraftPolish {
-    public static let model = "grok-4.7"
-    public static let endpoint = URL(string: "https://api.x.ai/v1/responses")!
+    public static let model = QwenChat.model
+    public static var endpoint: URL { QwenChat.endpoint }
     public static let maxCharacters = 2_000
 
     public static let systemPrompt = """
@@ -14,15 +14,16 @@ public enum DraftPolish {
     Без кавычек, списков и пояснений.
     """
 
-    /// `store: false` просит xAI не сохранять запрос; условия обработки определяет xAI.
+    /// Обычный запрос Chat Completions; условия обработки определяет QwenCloud.
     public static func requestBody(draft: String) throws -> Data {
         let text = normalizeInput(draft)
         guard !text.isEmpty else { throw DraftPolishError.empty }
         guard text.count <= maxCharacters else { throw DraftPolishError.tooLong(text.count) }
         let payload: [String: Any] = [
             "model": model,
-            "store": false,
-            "input": [
+            "enable_thinking": false,
+            "max_tokens": 4096,
+            "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text],
             ],
@@ -40,14 +41,14 @@ public enum DraftPolish {
         return req
     }
 
-    /// Достаёт текст записи из ответа Responses API и пропускает блок рассуждения.
+    /// Достаёт текст записи из ответа Chat Completions API и пропускает блок рассуждения.
     public static func parse(_ data: Data) throws -> String {
-        try XAIResponses.extractText(data, cleanOutput: cleanOutput)
+        try QwenChat.extractText(data, cleanOutput: cleanOutput)
     }
 
     public static func errorMessage(from data: Data) -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        // xAI отвечает {"code":…,"error":"текст"}; формат {"error":{"message":…}} оставлен для совместимости.
+        // QwenCloud отвечает {"code":…,"error":"текст"}; формат {"error":{"message":…}} оставлен для совместимости.
         let candidates: [String?] = [
             (json["error"] as? [String: Any])?["message"] as? String,
             json["error"] as? String,
@@ -66,7 +67,7 @@ public enum DraftPolish {
 
     /// Одна фраза для поля ввода: без ограды кода, внешней кавычки и подписи «Запись:».
     public static func cleanOutput(_ raw: String) -> String {
-        let s = stripOnePair(XAIResponses.stripCodeFence(raw))
+        let s = stripOnePair(QwenChat.stripCodeFence(raw))
         let lines = s.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -92,6 +93,7 @@ public enum DraftPolishError: Error, Equatable, LocalizedError {
     case tooLong(Int)
     case contextTooLarge(Int)
     case badResponse
+    case truncatedResponse
     case http(Int, String)
     case noKey
 
@@ -104,11 +106,13 @@ public enum DraftPolishError: Error, Equatable, LocalizedError {
         case .contextTooLarge(let count):
             return "Заметок слишком много для одного запроса (\(count) знаков). Удалите часть или задайте вопрос по меньшему объёму."
         case .badResponse:
-            return "xAI ответил, но в ответе не нашлось текста записи."
+            return "QwenCloud ответил, но в ответе не нашлось текста записи."
+        case .truncatedResponse:
+            return "Ответ QwenCloud оборвался по лимиту длины. Попробуйте сократить исходный текст."
         case .http(let code, let message):
-            return message.isEmpty ? "xAI ответил с ошибкой \(code)." : "xAI ответил с ошибкой \(code): \(message)"
+            return message.isEmpty ? "QwenCloud ответил с ошибкой \(code)." : "QwenCloud ответил с ошибкой \(code): \(message)"
         case .noKey:
-            return "Нет ключа xAI. Укажите его в меню «День» → «Ключ xAI…»."
+            return "Нет ключа QwenCloud. Укажите его в меню «День» → «Ключ QwenCloud…»."
         }
     }
 }
@@ -133,7 +137,7 @@ public struct DraftPolishClient {
         }
         guard let http = response as? HTTPURLResponse else { throw DraftPolishError.badResponse }
         guard (200 ... 299).contains(http.statusCode) else {
-            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data))
+            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data).replacingOccurrences(of: trimmed, with: "[ключ скрыт]"))
         }
         return try DraftPolish.parse(data)
     }

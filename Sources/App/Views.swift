@@ -131,7 +131,7 @@ struct ContentView: View {
             APIKeySheet(
                 key: $keyField,
                 error: keyError,
-                hasSavedKey: XAIKeyStore.load() != nil,
+                hasSavedKey: QwenKeyStore.load() != nil,
                 onCancel: closeKeySheet,
                 onSave: saveKey,
                 onDelete: deleteKey
@@ -193,7 +193,7 @@ struct ContentView: View {
                 Button { state.summarizeDay() } label: {
                     Label("Итог дня", systemImage: "doc.plaintext")
                 }
-                .help("Спокойный итог дня через xAI (⌥⌘I)")
+                .help("Спокойный итог дня через QwenCloud (⌥⌘I)")
                 .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             }
         }
@@ -409,7 +409,7 @@ struct ContentView: View {
     private func beginPolish() {
         let text = DraftPolish.normalizeInput(draftText)
         guard !text.isEmpty, !state.isBlocked, !polishBusy else { return }
-        if XAIKeyStore.resolve() == nil {
+        if QwenKeyStore.resolve() == nil {
             keyField = ""
             keyError = nil
             state.keySheetIntent = .polish
@@ -420,7 +420,7 @@ struct ContentView: View {
 
     private func sendPolish() {
         guard let text = polishPreview, !polishBusy else { return }
-        guard let key = XAIKeyStore.resolve() else {
+        guard let key = QwenKeyStore.resolve() else {
             polishPreview = nil
             state.keySheetIntent = .polish
             return
@@ -461,7 +461,7 @@ struct ContentView: View {
 
     private func saveKey() {
         do {
-            try XAIKeyStore.save(keyField)
+            try QwenKeyStore.save(keyField)
             let continuePolish = state.keySheetIntent == .polish
             closeKeySheet()
             if continuePolish {
@@ -474,7 +474,7 @@ struct ContentView: View {
 
     private func deleteKey() {
         do {
-            try XAIKeyStore.delete()
+            try QwenKeyStore.delete()
             keyField = ""
             keyError = nil
         } catch {
@@ -853,7 +853,7 @@ struct NoteEditor: View {
         HStack(spacing: 8) {
             Button("Оформить", action: beginPolish)
                 .disabled(polishDraft.isEmpty || polishBusy || state.isBlocked)
-                .help("В xAI отправятся заголовок и текст текущего наброска; дневник, план и другие заметки не отправляются.")
+                .help("В QwenCloud отправятся заголовок и текст текущего наброска; дневник, план и другие заметки не отправляются.")
             if polishBusy {
                 ProgressView()
                     .controlSize(.small)
@@ -1028,7 +1028,7 @@ struct AskView: View {
                         .tint(Theme.accent)
                         .disabled(draftIsBlank || state.chatBusy)
                 }
-                Text("В xAI отправляются все заметки, вопросы и ответы этой беседы; дневник и план не отправляются.")
+                Text("В QwenCloud отправляются все заметки, вопросы и ответы этой беседы; дневник и план не отправляются.")
                     .font(.caption)
                     .foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1275,7 +1275,7 @@ private struct PolishConfirmSheet: View {
             Text("Причесать черновик")
                 .font(.title2.bold())
                 .foregroundStyle(Theme.ink)
-            Text("В xAI отправляется только текст этого черновика; записи дневника и задачи не отправляются. Запрос отправляется с просьбой не сохранять его; условия обработки определяет xAI. В дневник текст попадёт только после «Записать».")
+            Text("В QwenCloud отправляется только текст этого черновика; записи дневника и задачи не отправляются. Условия обработки данных определяет QwenCloud. В дневник текст попадёт только после «Записать».")
                 .font(.callout)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1334,7 +1334,7 @@ private struct DaySummarySheet: View {
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
             }
             HStack(alignment: .firstTextBaseline) {
-                Text("Итог не записывается в дневник. Запрос отправляется с просьбой не сохранять его; условия обработки определяет xAI.")
+                Text("Итог не записывается в дневник. Условия обработки данных определяет QwenCloud.")
                     .font(.caption)
                     .foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1356,6 +1356,7 @@ private struct DaySummarySheet: View {
 }
 
 private struct APIKeySheet: View {
+    @AppStorage(QwenChat.regionPreference) private var region = QwenRegion.singapore.rawValue
     @Binding var key: String
     let error: String?
     let hasSavedKey: Bool
@@ -1365,10 +1366,10 @@ private struct APIKeySheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Ключ xAI")
+            Text("Ключ QwenCloud")
                 .font(.title2.bold())
                 .foregroundStyle(Theme.ink)
-            Text("Ключ хранится в Связке ключей этого Mac и не записывается в файл дневника. Если в Связке ключей его нет, приложение берёт XAI_API_KEY из окружения запуска.")
+            Text("Ключ хранится в Связке ключей этого Mac и не записывается в файл дневника. Если в Связке ключей его нет, приложение берёт QWENCLOUD_API_KEY из окружения запуска.")
                 .font(.callout)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1377,8 +1378,16 @@ private struct APIKeySheet: View {
                     .font(.callout)
                     .foregroundStyle(Theme.quiet)
             }
-            SecureField("Ключ xAI", text: $key)
+            SecureField("Ключ QwenCloud", text: $key)
                 .textFieldStyle(.roundedBorder)
+            Picker("Регион ключа", selection: $region) {
+                ForEach(QwenRegion.allCases) { item in
+                    Text(item.title).tag(item.rawValue)
+                }
+            }
+            Text("Выберите регион, где создан ключ в QwenCloud. Модель: Qwen3.8-Flash. Нужен обычный API Key, не ключ Token Plan.")
+                .font(.caption)
+                .foregroundStyle(Theme.quiet)
             if let error {
                 Text(error).font(.callout).foregroundStyle(.red)
             }

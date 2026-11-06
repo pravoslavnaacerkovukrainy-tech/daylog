@@ -1,10 +1,10 @@
 import Foundation
 
-/// Превращение сумбурного наброска в заметку {заголовок, тело} через xAI Responses API.
+/// Превращение сумбурного наброска в заметку {заголовок, тело} через QwenCloud Chat Completions API.
 /// В запрос попадает только текст наброска. Дневник, план и другие заметки не передаются.
 public enum NotePolish {
-    public static let model = "grok-4.7"
-    public static let endpoint = URL(string: "https://api.x.ai/v1/responses")!
+    public static let model = QwenChat.model
+    public static var endpoint: URL { QwenChat.endpoint }
     public static let maxCharacters = 6_000
 
     public static let systemPrompt = """
@@ -14,15 +14,16 @@ public enum NotePolish {
     Сохрани все факты, имена и числа. Ничего не выдумывай и не оценивай. Язык — как у наброска.
     """
 
-    /// `store: false` просит xAI не сохранять запрос; условия обработки определяет xAI.
+    /// Обычный запрос Chat Completions; условия обработки определяет QwenCloud.
     public static func requestBody(draft: String) throws -> Data {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DraftPolishError.empty }
         guard text.count <= maxCharacters else { throw DraftPolishError.tooLong(text.count) }
         let payload: [String: Any] = [
             "model": model,
-            "store": false,
-            "input": [
+            "enable_thinking": false,
+            "max_tokens": 4096,
+            "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text],
             ],
@@ -42,8 +43,8 @@ public enum NotePolish {
 
     /// Разбор ответа: текст → снятие ограды → JSON {title, body}; при неудаче — фолбэк.
     public static func parse(_ data: Data) throws -> (title: String, body: String) {
-        let text = try XAIResponses.extractText(data)
-        let unfenced = XAIResponses.stripCodeFence(text)
+        let text = try QwenChat.extractText(data)
+        let unfenced = QwenChat.stripCodeFence(text)
         if let d = unfenced.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
            let rawBody = obj["body"] as? String {
@@ -84,7 +85,7 @@ public struct NotePolishClient {
         }
         guard let http = response as? HTTPURLResponse else { throw DraftPolishError.badResponse }
         guard (200 ... 299).contains(http.statusCode) else {
-            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data))
+            throw DraftPolishError.http(http.statusCode, DraftPolish.errorMessage(from: data).replacingOccurrences(of: trimmed, with: "[ключ скрыт]"))
         }
         return try NotePolish.parse(data)
     }
