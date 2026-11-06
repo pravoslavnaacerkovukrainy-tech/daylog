@@ -70,12 +70,13 @@ struct DaylogCommands: Commands {
                 state.requestFocus(.add)
             }
                 .keyboardShortcut("n")
-            Button("Новый пункт плана") {
+            Button("Новая задача") {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
-                state.requestFocus(.plan)
+                state.requestNewTask()
             }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(state.isBlocked)
             Button("Новая заметка") {
                 state.mode = .notes
                 state.selectedNoteID = nil
@@ -120,9 +121,6 @@ struct DaylogCommands: Commands {
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             Divider()
-            Button("Показать или скрыть план") { state.showPlan.toggle() }
-                .keyboardShortcut("p", modifiers: [.command, .option])
-            Divider()
             Button("Причесать черновик") { state.requestPolish() }
                 .keyboardShortcut(.return, modifiers: [.command, .option])
             Button("Ключ xAI…") { state.keySheetIntent = .settings }
@@ -139,10 +137,11 @@ struct MenuBarContent: View {
             showWindow()
             state.requestFocus(.add)
         }
-        Button("Новый пункт плана…") {
+        Button("Новая задача…") {
             showWindow()
-            state.requestFocus(.plan)
+            state.requestNewTask()
         }
+        .disabled(state.isBlocked)
         Button("Новая заметка…") {
             state.mode = .notes
             state.selectedNoteID = nil

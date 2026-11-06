@@ -22,7 +22,7 @@ struct QuietCheckboxStyle: ToggleStyle {
 enum Theme {
     /// Лист ленты дня.
     static let canvas = Color(nsColor: .textBackgroundColor)
-    /// Панель плана и хром.
+    /// Панели и хром.
     static let pane = Color(nsColor: .windowBackgroundColor)
     static let ink = dynamic(0x263747, dark: .labelColor)
     static let quiet = dynamic(0x657586, dark: .secondaryLabelColor)
@@ -60,10 +60,6 @@ struct ContentView: View {
     @State private var editing: DiaryEntry?
     @State private var pendingDelete: DiaryEntry?
 
-    @State private var planDraft = ""
-    @State private var editingPlan: DayPlan?
-    @State private var pendingPlanDelete: DayPlan?
-    @State private var pendingReopen: DayPlan?
     @State private var polishPreview: String?
     @State private var polishBusy = false
     @State private var polishTask: Task<Void, Never>?
@@ -85,15 +81,8 @@ struct ContentView: View {
                     statusArea.padding(.horizontal, 20).padding(.bottom, 10)
                 }
             case .day:
-                HStack(spacing: 0) {
-                    mainColumn
-                        .frame(minWidth: 440, maxWidth: .infinity)
-                    if state.showPlan {
-                        Divider()
-                        planPane
-                            .frame(width: 280)
-                    }
-                }
+                mainColumn
+                    .frame(minWidth: 440, maxWidth: .infinity)
             case .notes:
                 VStack(spacing: 0) {
                     NotesView()
@@ -207,12 +196,6 @@ struct ContentView: View {
                 .help("Спокойный итог дня через xAI (⌥⌘I)")
                 .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button { state.showPlan.toggle() } label: {
-                    Label(state.showPlan ? String("Скрыть план") : String("Показать план"), systemImage: "sidebar.right")
-                }
-                .help("План на день (⌥⌘P)")
-            }
         }
     }
 
@@ -251,7 +234,7 @@ struct ContentView: View {
 
     private func deleteMessage(for entry: DiaryEntry) -> String {
         var s = "«\(entry.text)» (\(DiaryFormat.shortDate(entry.timestamp)), \(DiaryFormat.time(entry.timestamp))). Сразу после удаления запись можно вернуть."
-        if entry.planID != nil { s += " Пункт плана останется отмеченным выполненным." }
+        if entry.planID != nil { s += " Задача останется отмеченной выполненной." }
         return s
     }
 
@@ -603,153 +586,6 @@ struct ContentView: View {
             .padding(.vertical, 16)
     }
 
-    // MARK: Plan pane
-
-    private var planPane: some View {
-        let list = state.dayPlans
-        let open = list.filter { !$0.isCompleted }
-        let done = list.filter { $0.isCompleted }
-        return VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("План на день")
-                    .font(.headline)
-                    .foregroundStyle(Theme.ink)
-                Text(DiaryFormat.capitalizedFirst(DiaryFormat.dayMonth(state.selectedDay)))
-                    .font(.callout)
-                    .foregroundStyle(Theme.quiet)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-
-            HStack(spacing: 6) {
-                Image(systemName: "plus").foregroundStyle(Theme.quiet)
-                TextField("Добавить в план", text: $planDraft)
-                    .textFieldStyle(.plain)
-                    .focused($focus, equals: .plan)
-                    .onSubmit(submitPlan)
-                    .accessibilityLabel("Новый пункт плана")
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.canvas))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(focus == .plan ? Theme.accent : Theme.rail, lineWidth: focus == .plan ? 1.5 : 1))
-            .disabled(state.isBlocked)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if list.isEmpty {
-                        Text("Пара дел на этот день — без сроков и напоминаний. Отмеченное сразу попадёт в дневник.")
-                            .font(.callout)
-                            .foregroundStyle(Theme.quiet)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    ForEach(open) { plan in
-                        planRow(plan)
-                            .id("plan-open-\(plan.id.uuidString)")
-                    }
-                    if !done.isEmpty {
-                        Text("Сделано")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.quiet)
-                            .padding(.top, open.isEmpty ? 0 : 12)
-                            .padding(.bottom, 2)
-                        ForEach(done) { plan in
-                            planRow(plan)
-                                .id("plan-done-\(plan.id.uuidString)")
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .confirmationDialog("Вернуть пункт в план?",
-                                isPresented: Binding(get: { pendingReopen != nil },
-                                                     set: { if !$0 { pendingReopen = nil } }),
-                                presenting: pendingReopen) { plan in
-                Button(reopenButtonTitle(plan)) {
-                    state.reopenPlan(plan)
-                    pendingReopen = nil
-                }
-                Button("Отмена", role: .cancel) { pendingReopen = nil }
-            } message: { plan in
-                Text(reopenMessage(plan))
-            }
-
-            if !open.isEmpty {
-                Text("Отметка добавляет запись в дневник с текущим временем.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.quiet)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(16)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Theme.pane)
-        .sheet(item: $editingPlan) { plan in
-            PlanEditor(state: state, plan: plan)
-        }
-        .confirmationDialog("Удалить пункт плана?",
-                            isPresented: Binding(get: { pendingPlanDelete != nil },
-                                                 set: { if !$0 { pendingPlanDelete = nil } }),
-                            presenting: pendingPlanDelete) { plan in
-            Button("Удалить", role: .destructive) {
-                state.deletePlan(plan)
-                pendingPlanDelete = nil
-            }
-            Button("Отмена", role: .cancel) { pendingPlanDelete = nil }
-        } message: { plan in
-            Text(planDeleteMessage(plan))
-        }
-    }
-
-    private func reopenButtonTitle(_ plan: DayPlan) -> String {
-        state.reopenWillRemoveEntry(plan) ? "Вернуть и убрать запись" : "Вернуть в план"
-    }
-
-    private func reopenMessage(_ plan: DayPlan) -> String {
-        if state.reopenWillRemoveEntry(plan) {
-            return "Запись «\(plan.text)», созданная отметкой, будет убрана из дневника."
-        }
-        return "Запись в дневнике меняли или удалили — её не тронем, снимется только отметка."
-    }
-
-    private func planDeleteMessage(_ plan: DayPlan) -> String {
-        if plan.isCompleted {
-            return "«\(plan.text)». Запись в дневнике останется. Сразу после удаления пункт можно вернуть."
-        }
-        return "«\(plan.text)». Сразу после удаления пункт можно вернуть."
-    }
-
-    private func planRow(_ plan: DayPlan) -> some View {
-        let linked = state.linkedEntry(for: plan)
-        var showEntry: (() -> Void)? = nil
-        if let entry = linked {
-            showEntry = {
-                state.go(to: entry.timestamp)
-                state.highlightedEntryID = entry.id
-            }
-        }
-        return PlanRow(
-            plan: plan,
-            entryTime: linked.map { DiaryFormat.time($0.timestamp) },
-            onToggle: {
-                if plan.isCompleted { pendingReopen = plan } else { state.completePlan(plan) }
-            },
-            onEdit: { editingPlan = plan },
-            onMoveNext: { state.movePlanToNextDay(plan) },
-            onDelete: { pendingPlanDelete = plan },
-            onShowEntry: showEntry
-        )
-    }
-
-    private func submitPlan() {
-        let t = planDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, !state.isBlocked else { return }
-        if state.addPlan(text: t) {
-            planDraft = ""
-            focus = .plan
-        }
-    }
 }
 
 // MARK: - Notes
@@ -1360,91 +1196,9 @@ struct EntryRow: View {
         .padding(3)
         .background(Circle().fill(Theme.canvas))
         .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 4 }
-        .help(entry.planID != nil ? "Из плана" : "")
-        .accessibilityLabel("Из плана")
+        .help(entry.planID != nil ? "Из задачи" : "")
+        .accessibilityLabel("Из задачи")
         .accessibilityHidden(entry.planID == nil)
-    }
-}
-
-// MARK: - Plan row
-
-struct PlanRow: View {
-    let plan: DayPlan
-    let entryTime: String?
-    let onToggle: () -> Void
-    let onEdit: () -> Void
-    let onMoveNext: () -> Void
-    let onDelete: () -> Void
-    let onShowEntry: (() -> Void)?
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Button(action: onToggle) {
-                Image(systemName: plan.isCompleted ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 15))
-                    .foregroundStyle(plan.isCompleted ? Theme.accent : Theme.quiet)
-            }
-            .buttonStyle(.plain)
-            .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 4 }
-            .help(toggleHelp)
-            .accessibilityLabel(toggleAccessibilityLabel)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(plan.text)
-                    .foregroundStyle(plan.isCompleted ? Theme.quiet : Theme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                if plan.isCompleted {
-                    if let t = entryTime, let show = onShowEntry {
-                        Button("Записано в дневник в \(t)", action: show)
-                            .buttonStyle(.link)
-                            .font(.caption)
-                            .help("Показать запись в ленте")
-                    } else if let doneAt = plan.completedAt {
-                        Text("Выполнено в \(DiaryFormat.time(doneAt)), запись удалена")
-                            .font(.caption)
-                            .foregroundStyle(Theme.quiet)
-                    }
-                }
-            }
-            Spacer(minLength: 4)
-            Menu {
-                menuItems
-            } label: {
-                Image(systemName: "ellipsis")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .opacity(hovering ? 1 : 0.35)
-            .accessibilityLabel("Действия с пунктом плана")
-        }
-        .padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { if !plan.isCompleted { onEdit() } }
-        .contextMenu { menuItems }
-    }
-
-    private var toggleHelp: String {
-        plan.isCompleted ? "Вернуть в план…" : "Отметить выполненным — запись появится в дневнике"
-    }
-
-    private var toggleAccessibilityLabel: String {
-        plan.isCompleted ? "Вернуть в план: \(plan.text)" : "Отметить выполненным: \(plan.text)"
-    }
-
-    @ViewBuilder
-    private var menuItems: some View {
-        if plan.isCompleted {
-            Button("Вернуть в план…", action: onToggle)
-        } else {
-            Button("Отметить выполненным", action: onToggle)
-            Button("Изменить…", action: onEdit)
-            Button("Перенести на следующий день", action: onMoveNext)
-        }
-        Divider()
-        Button("Удалить…", role: .destructive, action: onDelete)
     }
 }
 
@@ -1480,7 +1234,7 @@ struct EntryEditor: View {
                     .lineLimit(1...6)
             }
             if entry.planID != nil {
-                Text("Запись создана отметкой плана. Изменения останутся в дневнике, даже если вернуть пункт в план.")
+                Text("Запись создана выполнением задачи. Изменения останутся в дневнике, даже если вернуть задачу в работу.")
                     .font(.callout)
                     .foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1510,56 +1264,6 @@ struct EntryEditor: View {
     }
 }
 
-struct PlanEditor: View {
-    @ObservedObject var state: AppState
-    let plan: DayPlan
-    @Environment(\.dismiss) private var dismiss
-    @State private var text: String
-    @State private var day: Date
-    @State private var error: String?
-
-    init(state: AppState, plan: DayPlan) {
-        self.state = state
-        self.plan = plan
-        _text = State(initialValue: plan.text)
-        _day = State(initialValue: DiaryDay.date(plan.day) ?? Date())
-    }
-
-    private var isBlank: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Изменить пункт плана").font(.headline)
-            Form {
-                TextField("Что сделать:", text: $text, axis: .vertical)
-                    .lineLimit(1...4)
-                DatePicker("День:", selection: $day, displayedComponents: .date)
-            }
-            if let error {
-                Text(error).foregroundStyle(.red).font(.callout)
-            }
-            HStack {
-                Spacer()
-                Button("Отмена") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Сохранить", action: save)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isBlank)
-            }
-        }
-        .padding(20)
-        .frame(width: 420)
-    }
-
-    private func save() {
-        if state.updatePlan(id: plan.id, text: text, day: day) {
-            dismiss()
-        } else {
-            error = state.errorMessage
-        }
-    }
-}
-
 private struct PolishConfirmSheet: View {
     let draft: String
     let busy: Bool
@@ -1571,7 +1275,7 @@ private struct PolishConfirmSheet: View {
             Text("Причесать черновик")
                 .font(.title2.bold())
                 .foregroundStyle(Theme.ink)
-            Text("В xAI отправляется только текст этого черновика; записи дневника и план не отправляются. Запрос отправляется с просьбой не сохранять его; условия обработки определяет xAI. В дневник текст попадёт только после «Записать».")
+            Text("В xAI отправляется только текст этого черновика; записи дневника и задачи не отправляются. Запрос отправляется с просьбой не сохранять его; условия обработки определяет xAI. В дневник текст попадёт только после «Записать».")
                 .font(.callout)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)

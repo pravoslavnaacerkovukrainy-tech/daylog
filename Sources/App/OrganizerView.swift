@@ -119,6 +119,10 @@ struct OrganizerView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in now = Date() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in now = Date() }
+        .onAppear(perform: handleTaskCreationRequest)
+        .onChange(of: state.taskCreationRequested) { _, requested in
+            if requested { handleTaskCreationRequest() }
+        }
         .sheet(item: $taskSheet) { sheet in
             OrganizerTaskEditor(state: state, task: sheet.task, projectID: sheet.projectID,
                                 area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay)
@@ -437,6 +441,12 @@ struct OrganizerView: View {
         let status: TaskStatus = current == .inbox ? .inbox : (current == .waiting ? .waiting : .ready)
         taskSheet = TaskSheet(projectID: project?.id, area: project?.area ?? scope.defaultArea,
                               status: status, plannedDay: current == .today ? Date() : nil)
+    }
+    private func handleTaskCreationRequest() {
+        guard state.taskCreationRequested else { return }
+        state.taskCreationRequested = false
+        guard !state.isBlocked, taskSheet == nil, projectSheet == nil else { return }
+        newTask(project: selectedProject)
     }
     private func edit(_ task: DayPlan) {
         taskSheet = TaskSheet(task: task, projectID: task.projectID, area: task.taskArea, status: task.taskStatus)

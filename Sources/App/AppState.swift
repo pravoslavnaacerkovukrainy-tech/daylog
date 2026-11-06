@@ -5,10 +5,9 @@ import UniformTypeIdentifiers
 enum FocusTarget: Hashable {
     case add
     case search
-    case plan
 }
 
-/// Какое пространство показано в окне: день (записи + план), заметочник или чат.
+/// Рабочее пространство: задачи, дневник, заметки или чат.
 enum AppMode: Hashable {
     case organizer
     case day
@@ -41,6 +40,7 @@ final class AppState: ObservableObject {
     @Published private(set) var projects: [DiaryProject] = []
     @Published var organizerCaptureText = ""
     @Published var mode: AppMode = .organizer
+    @Published var taskCreationRequested = false
     @Published var chatMessages: [ChatMessage] = []
     @Published private(set) var chatBusy: Bool = false
     private var chatTask: Task<Void, Never>?
@@ -55,9 +55,8 @@ final class AppState: ObservableObject {
     @Published var errorMessage: String?
     @Published var statusMessage: String?
     @Published var undo: UndoAction?
-    /// Запись, которую стоит подсветить (только что создана отметкой плана).
+    /// Запись, которую стоит подсветить после выполнения задачи.
     @Published var highlightedEntryID: UUID?
-    @Published var showPlan: Bool = true
     @Published private(set) var focusRequest: FocusTarget?
     @Published private(set) var focusToken: Int = 0
 
@@ -96,7 +95,6 @@ final class AppState: ObservableObject {
     var blockReason: String? { store.blockReason }
     var isSearching: Bool { !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var dayEntries: [DiaryEntry] { _ = entries; return store.entriesOnDay(selectedDay) }
-    var dayPlans: [DayPlan] { _ = plans; return store.plansOnDay(selectedDay) }
     var searchResults: [DiaryEntry] { _ = entries; return store.search(searchText) }
     var sortedNotes: [DiaryNote] { _ = notes; return store.sortedNotes() }
     var noteSearchResults: [DiaryNote] { _ = notes; return store.searchNotes(noteSearchText) }
@@ -144,9 +142,14 @@ final class AppState: ObservableObject {
     }
 
     func requestFocus(_ target: FocusTarget) {
-        if target == .plan { showPlan = true }
         focusRequest = target
         focusToken += 1
+    }
+
+    func requestNewTask() {
+        mode = .organizer
+        guard !isBlocked else { return }
+        taskCreationRequested = true
     }
 
     /// Меню «Причесать черновик». Само поле ввода живёт в окне и слушает этот счётчик.
@@ -212,50 +215,12 @@ final class AppState: ObservableObject {
 
     // MARK: Plan mutations
 
-    @discardableResult
-    func addPlan(text: String) -> Bool {
-        do {
-            let p = try store.addPlan(text: text, day: selectedDay)
-            refresh()
-            undo = nil
-            saved("Добавлено в план: «\(p.text)»")
-            return true
-        } catch {
-            fail(error)
-            return false
-        }
-    }
-
-    @discardableResult
-    func updatePlan(id: UUID, text: String, day: Date) -> Bool {
-        do {
-            let p = try store.updatePlan(id: id, text: text, day: day)
-            refresh()
-            undo = nil
-            if p.day != DiaryDay.key(selectedDay), let d = DiaryDay.date(p.day) {
-                saved("План перенесён на \(DiaryFormat.dayMonth(d))")
-            } else {
-                saved("План изменён")
-            }
-            return true
-        } catch {
-            fail(error)
-            return false
-        }
-    }
-
-    func movePlanToNextDay(_ plan: DayPlan) {
-        guard let d = DiaryDay.date(plan.day),
-              let next = Calendar.current.date(byAdding: .day, value: 1, to: d) else { return }
-        updatePlan(id: plan.id, text: plan.text, day: next)
-    }
-
     func deletePlan(_ plan: DayPlan) {
         do {
             let removed = try store.deletePlan(id: plan.id)
             refresh()
             undo = .restorePlan(removed)
-            saved(removed.isCompleted ? "Пункт плана удалён, запись в дневнике осталась" : "Пункт плана удалён")
+            saved(removed.isCompleted ? "Задача удалена, запись в дневнике осталась" : "Задача удалена")
         } catch {
             fail(error)
         }
@@ -290,11 +255,11 @@ final class AppState: ObservableObject {
             highlightedEntryID = nil
             switch outcome {
             case .removedEntry:
-                saved("Пункт возвращён в план, его запись убрана из дневника")
+                saved("Задача возвращена в работу, её запись убрана из дневника")
             case .keptEntry:
-                saved("Пункт возвращён в план; изменённая запись осталась в дневнике")
+                saved("Задача возвращена в работу; изменённая запись осталась в дневнике")
             case .noEntry:
-                saved("Пункт возвращён в план")
+                saved("Задача возвращена в работу")
             }
         } catch {
             fail(error)
