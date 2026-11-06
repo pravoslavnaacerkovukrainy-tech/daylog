@@ -6,9 +6,11 @@
 
 **Органайзер рабочих и личных задач для macOS - для дней, когда данных не хватает, а планы меняются.**
 
+Записывайте дела, оставляйте точку продолжения и выбирайте следующее действие. Большую или непонятную задачу можно разбить на небольшие последовательные шаги вручную или с помощью QwenCloud. ИИ может задать уточняющие вопросы, а вы проверяете, редактируете и сохраняете предложенный список. Основные данные хранятся на Mac, ИИ подключается только по вашему действию.
+
 <p>
   <a href="https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/latest">
-    <img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C_%D0%B4%D0%BB%D1%8F_Mac-v0.2.1-2F6690?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать «Хаос Дня» 0.2.1 для Mac" />
+    <img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C_%D0%B4%D0%BB%D1%8F_Mac-v0.2.4-2F6690?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать «Хаос Дня» 0.2.4 для Mac" />
   </a>
 </p>
 
@@ -184,7 +186,7 @@ open "build/Хаос Дня.app"
 
 ## Разработка
 
-Локальная сборка: **0.2.4, build 6**, пока не опубликована. Кнопка скачивания в начале README ведёт к публичному выпуску.
+Текущий выпуск: **0.2.4, build 6**. Архив приложения доступен на [странице версии](https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/tag/v0.2.4).
 
 ```bash
 bash test.sh    # тесты ядра: без сети и без доступа к вашим данным
@@ -210,5 +212,5 @@ docs/             методика, спецификации и планы
 ---
 
 <div align="center">
-  <strong>Личный проект · локальная версия 0.2.4 (build 6)</strong>
+  <strong>Личный проект · версия 0.2.4 (build 6)</strong>
 </div>
