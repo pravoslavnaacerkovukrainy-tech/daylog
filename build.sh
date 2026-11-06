@@ -38,6 +38,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$CHECK"
 
 echo "→ Компиляция ($TARGET)…"
 xcrun swiftc \
+  -module-cache-path "$PROJECT/build/ModuleCache" \
   -swift-version 5 \
   -parse-as-library \
   -O \
@@ -57,8 +58,9 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # стабилен между пересборками, поэтому доступ к ключу QwenCloud в Связке ключей не слетает
 # и его не нужно вводить заново. Если идентичности нет (чистый клон, другой Mac,
 # публичная сборка) — подпись ad hoc, как раньше. Сертификат в репозиторий не входит.
+# DAYLOG_ADHOC_SIGN=1 проверяет сборку без обращения к Keychain.
 SIGN_ID="${DAYLOG_SIGN_ID:-Daylog Local Signing}"
-if security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
+if [[ "${DAYLOG_ADHOC_SIGN:-0}" != "1" ]] && security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_ID"; then
   echo "→ Подпись локальной идентичностью и строгая проверка (вне Documents)…"
   codesign --force --sign "$SIGN_ID" "$APP"
 else

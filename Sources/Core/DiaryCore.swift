@@ -39,6 +39,8 @@ public struct DayPlan: Codable, Identifiable, Equatable, Hashable {
     /// Запись дневника, созданная отметкой (nil, если её удалили или план не выполнен).
     public var entryID: UUID?
     public var organization: TaskOrganization?
+    /// Линейные действия внутри задачи. nil в прежних файлах.
+    public var steps: [TaskStep]?
 
     public var isCompleted: Bool { completedAt != nil }
 
@@ -92,12 +94,13 @@ public enum DiaryDay {
 
 /// Версионированный документ: и файл хранилища, и файл экспорта JSON.
 /// Версия 1 — только записи. Версия 2 — записи + планы и связи. Версия 3 — + заметки.
-/// Версия 4 — проекты и необязательные поля органайзера в планах.
+/// Версия 4: проекты и необязательные поля органайзера в планах.
+/// Версия 5: линейные шаги внутри задачи. Прежние файлы читаются без шагов.
 /// Файл без планов пишется как v1, с планами без заметок — v2 (его читает и прежняя сборка);
 /// как только появляются заметки — v3.
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public var format: String
     public var version: Int
@@ -118,7 +121,7 @@ public struct DiaryDocument: Codable {
         let needsV2 = !plans.isEmpty || entries.contains { $0.planID != nil }
         let needsV3 = !notes.isEmpty
         let needsV4 = !projects.isEmpty || plans.contains { $0.organization != nil || $0.day.isEmpty }
-        self.version = needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1))
+        self.version = plans.contains { $0.steps != nil } ? 5 : (needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1)))
     }
 
     enum CodingKeys: String, CodingKey {
@@ -381,6 +384,10 @@ public final class DiaryStore {
                 let backup = directory.appendingPathComponent("entries-before-organizer-\(UUID().uuidString).json")
                 try original.write(to: backup, options: .withoutOverwriting)
             }
+            if document.version >= 5, let original = loadedData, try DiaryJSON.decode(original).version < 5 {
+                let backup = directory.appendingPathComponent("entries-before-steps-\(UUID().uuidString).json")
+                try original.write(to: backup, options: .withoutOverwriting)
+            }
             try data.write(to: fileURL, options: .atomic)
             loadedData = data
         } catch let error as DiaryError {
@@ -560,6 +567,7 @@ public final class DiaryStore {
     @discardableResult
     public func deletePlan(id: UUID) throws -> DayPlan {
         guard let p = plans.first(where: { $0.id == id }) else { throw DiaryError.notFound }
+        guard (p.steps ?? []).isEmpty else { throw TaskStepsError.parentHasSteps }
         var newEntries = entries
         for i in newEntries.indices where newEntries[i].planID == id {
             newEntries[i].planID = nil

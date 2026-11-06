@@ -76,7 +76,7 @@ public struct DiaryProject: Codable, Identifiable, Equatable, Hashable {
 }
 
 public extension DiaryStore {
-    var hasOrganizerData: Bool { !projects.isEmpty || plans.contains { $0.organization != nil } }
+    var hasOrganizerData: Bool { !projects.isEmpty || plans.contains { $0.organization != nil || $0.steps != nil } }
 
     func organizerMarkdown(calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()
@@ -101,6 +101,12 @@ public extension DiaryStore {
         for task in Self.sortedPlans(plans) {
             output += "\n" + quoted(task.text) + "\n\n"
             output += "Сфера: \(task.taskArea.title). Состояние: \(task.isCompleted ? "выполнено" : task.taskStatus.title).\n"
+            if !task.taskSteps.isEmpty {
+                output += "\nШаги задачи (ID: \(task.id.uuidString)):\n"
+                for (index, step) in task.taskSteps.enumerated() {
+                    output += "\n\(index + 1). [\(step.isCompleted ? "x" : " ")] ID: \(step.id.uuidString)\n" + quoted(step.text) + "\n"
+                }
+            }
             if let project = projects.first(where: { $0.id == task.projectID }) { output += "\nПроект:\n" + quoted(project.title) + "\n" }
             if !task.day.isEmpty { output += "\nДень работы:\n" + quoted(task.day) + "\n" }
             if let deadline = task.organization?.deadline { output += "\nСрок результата: \(formatter.string(from: deadline)).\n" }

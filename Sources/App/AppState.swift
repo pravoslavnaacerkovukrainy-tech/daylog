@@ -38,6 +38,18 @@ final class AppState: ObservableObject {
     @Published private(set) var plans: [DayPlan] = []
     @Published private(set) var notes: [DiaryNote] = []
     @Published private(set) var projects: [DiaryProject] = []
+    private var breakdownDrafts: [UUID: TaskBreakdownDraft] = [:]
+
+    func breakdownDraft(for task: DayPlan) -> TaskBreakdownDraft {
+        // sheet хранит исходный item, после сохранения нужен свежий снимок из состояния.
+        let current = plans.first { $0.id == task.id } ?? task
+        // Вызывается из sheet body: существующий ObservableObject здесь не меняется.
+        if let draft = breakdownDrafts[task.id] { return draft }
+        let draft = TaskBreakdownDraft(parent: current)
+        breakdownDrafts[task.id] = draft
+        return draft
+    }
+
     @Published var organizerCaptureText = ""
     @Published var mode: AppMode = .organizer
     @Published var taskCreationRequested = false
@@ -75,6 +87,10 @@ final class AppState: ObservableObject {
         plans = store.plans
         notes = store.notes
         projects = store.projects
+        // Обновление происходит после мутации хранилища, вне вычисления SwiftUI body.
+        for (id, draft) in breakdownDrafts {
+            if let current = plans.first(where: { $0.id == id }) { draft.reopen(parent: current) }
+        }
     }
 
     @discardableResult

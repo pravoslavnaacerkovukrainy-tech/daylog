@@ -50,6 +50,8 @@ struct OrganizerView: View {
     @State private var selectedProjectID: UUID?
     @State private var showCompleted = false
     @State private var showArchived = false
+    @State private var breakdownTask: DayPlan?
+    @State private var completing: DayPlan?
     @State private var deleting: DayPlan?
     @State private var reopening: DayPlan?
     @State private var deletingProject: DiaryProject?
@@ -127,6 +129,12 @@ struct OrganizerView: View {
             OrganizerTaskEditor(state: state, task: sheet.task, projectID: sheet.projectID,
                                 area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay)
         }
+        .sheet(item: $breakdownTask) { task in
+            TaskBreakdownView(state: state, draft: state.breakdownDraft(for: task))
+        }
+        .confirmationDialog("Подтвердить результат задачи?", isPresented: Binding(get: { completing != nil }, set: { if !$0 { completing = nil } })) {
+            Button("Результат достигнут, выполнить задачу") { if let task = completing { state.completePlan(task) }; completing = nil }
+        } message: { Text("Отметки шагов сохранятся. Только это действие завершит исходную задачу и создаст запись дневника.") }
         .sheet(item: $projectSheet) { sheet in
             OrganizerProjectEditor(state: state, project: sheet.project, area: sheet.area) { id in
                 scope = .all
@@ -136,7 +144,7 @@ struct OrganizerView: View {
         }
         .confirmationDialog("Удалить задачу?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
             Button("Удалить", role: .destructive) { if let task = deleting { state.deletePlan(task) }; deleting = nil }
-        } message: { Text("Связанная запись останется в дневнике. Сразу после удаления задачу можно вернуть.") }
+        } message: { Text("Связанная запись останется в дневнике. Задачу с шагами удалить нельзя: сначала явно удалите шаги и сохраните список. Сразу после удаления задачу можно вернуть.") }
         .confirmationDialog("Вернуть задачу?", isPresented: Binding(get: { reopening != nil }, set: { if !$0 { reopening = nil } })) {
             Button("Вернуть в задачи") { if let task = reopening { state.reopenPlan(task) }; reopening = nil }
         } message: { Text("Неизменённая запись о выполнении будет убрана из дневника. Отредактированная запись сохранится.") }
@@ -281,7 +289,7 @@ struct OrganizerView: View {
     private func taskRow(_ task: DayPlan) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Button {
-                if task.isCompleted { reopening = task } else { state.completePlan(task) }
+                if task.isCompleted { reopening = task } else if !task.taskSteps.isEmpty { completing = task } else { state.completePlan(task) }
             } label: {
                 Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 20)).foregroundStyle(task.isCompleted ? Color.accentColor : Color.secondary)
@@ -290,6 +298,7 @@ struct OrganizerView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(task.text).strikethrough(task.isCompleted).foregroundStyle(task.isCompleted ? .secondary : .primary)
+                        .onTapGesture { if !task.isCompleted { edit(task) } }
                     Spacer(minLength: 8)
                     if !task.isCompleted {
                         Button { edit(task) } label: { Image(systemName: "ellipsis") }
@@ -306,6 +315,17 @@ struct OrganizerView: View {
                 if task.taskStatus == .waiting, let who = task.organization?.waitingFor, !task.isCompleted {
                     Label(who, systemImage: "hourglass").font(.callout).foregroundStyle(.secondary)
                 }
+                if !task.taskSteps.isEmpty {
+                    if let next = task.nextStep {
+                        Label(task.isCompleted ? "Незавершённый шаг: \(next.text)" : "Следующий: \(next.text)", systemImage: "arrow.right.circle").font(.callout)
+                    } else {
+                        Text(task.isCompleted ? "Результат задачи подтверждён." : "Шаги выполнены. Подтвердите результат задачи.").font(.callout).foregroundStyle(.secondary)
+                    }
+                    Text("Выполнено шагов: \(task.taskSteps.filter(\.isCompleted).count) из \(task.taskSteps.count)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги") { breakdownTask = task }
+                    .buttonStyle(.borderless).disabled(state.isBlocked)
                 if !task.day.isEmpty { Text("День работы · \(task.day)").font(.caption).foregroundStyle(.secondary) }
                 if let deadline = task.organization?.deadline {
                     Label("Срок · \(DiaryFormat.shortDate(deadline))", systemImage: "flag")
@@ -315,9 +335,10 @@ struct OrganizerView: View {
                     Label("Пересмотреть · \(DiaryFormat.shortDate(date))", systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption).foregroundStyle(isReviewDue(date) ? Color.accentColor : Color.secondary)
                 }
-            }.contentShape(Rectangle()).onTapGesture { if !task.isCompleted { edit(task) } }
+            }.contentShape(Rectangle())
         }.padding(.vertical, 9).accessibilityElement(children: .contain)
             .contextMenu {
+                Button(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги") { breakdownTask = task }
                 if !task.isCompleted {
                     Button("Изменить") { edit(task) }
                     Button("Запланировать на сегодня") { scheduleToday(task) }
@@ -495,6 +516,7 @@ private struct OrganizerTaskEditor: View {
     @State private var hasReview: Bool
     @State private var review: Date
     @State private var saveError: String?
+    @State private var showSteps = false
 
     init(state: AppState, task: DayPlan?, projectID: UUID?, area: TaskArea, status: TaskStatus, plannedDay: Date?) {
         self.state = state
@@ -535,6 +557,13 @@ private struct OrganizerTaskEditor: View {
                     OrganizerDateField(title: "Срок результата", enabled: $hasDeadline, date: $deadline)
                     OrganizerDateField(title: "Дата пересмотра", enabled: $hasReview, date: $review)
                 }
+                if task != nil {
+                    Section("Шаги задачи") {
+                        Button("Разбить на шаги") { showSteps = true }
+                        Text("Откроется сохранённая версия задачи. Сначала сохраните изменения названия и подробностей, если они нужны для разбиения.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Section("Заметка к задаче") {
                     TextField("Подробности или что нужно выяснить", text: $details, axis: .vertical).lineLimit(3...7)
                 }
@@ -547,6 +576,11 @@ private struct OrganizerTaskEditor: View {
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
             }.padding(20)
         }.frame(width: 540, height: 650)
+            .sheet(isPresented: $showSteps) {
+                if let task, let current = state.plans.first(where: { $0.id == task.id }) {
+                    TaskBreakdownView(state: state, draft: state.breakdownDraft(for: current))
+                }
+            }
             .onChange(of: projectID) { _, id in
                 if let project = state.projects.first(where: { $0.id == id }) { area = project.area }
             }
