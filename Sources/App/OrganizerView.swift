@@ -565,7 +565,22 @@ private struct OrganizerTaskEditor: View {
                     }
                 }
                 Section("Заметка к задаче") {
-                    TextField("Подробности или что нужно выяснить", text: $details, axis: .vertical).lineLimit(3...7)
+                    TextEditor(text: $details)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 100, idealHeight: 120, maxHeight: 180)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(alignment: .topLeading) {
+                            if details.isEmpty {
+                                Text("Подробности или что нужно выяснить")
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 8)
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .accessibilityLabel("Заметка к задаче")
                 }
             }.formStyle(.grouped)
             if let error = saveError { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled).padding(.horizontal, 20) }
