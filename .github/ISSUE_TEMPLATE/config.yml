@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Уязвимость
+    url: https://github.com/pravoslavnaacerkovukrainy-tech/daylog/security/advisories/new
+    about: Об уязвимости сообщайте приватно, не в публичном issue.

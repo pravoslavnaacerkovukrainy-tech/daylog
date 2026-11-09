@@ -1,0 +1,63 @@
+name: Ошибка
+description: Приложение работает не так, как описано в README.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Не прикладывайте `entries.json`, тексты дневника, заметок и задач, ключ QwenCloud.
+        Воспроизведите ошибку на вымышленных данных: `DAYLOG_DATA_DIR="$(mktemp -d)" "/Applications/Хаос Дня.app/Contents/MacOS/Daylog"`.
+  - type: input
+    id: version
+    attributes:
+      label: Версия приложения
+      description: Меню «Хаос Дня» -> «О программе».
+      placeholder: 0.2.8 (10)
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: Версия macOS и процессор
+      placeholder: macOS 27.2, Apple M2
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Откуда установлено
+      options:
+        - Готовая сборка со страницы выпусков
+        - Собрано из исходников (bash build.sh)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги
+      placeholder: |
+        1. Открыть «Место хаоса».
+        2. Записать строку «тест».
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидалось
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Что произошло
+      description: Текст ошибки, снимок окна на вымышленных данных.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Личные данные
+      options:
+        - label: В этом issue нет моих записей, заметок, задач и ключа QwenCloud.
+          required: true

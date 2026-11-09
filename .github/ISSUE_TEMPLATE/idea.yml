@@ -1,0 +1,31 @@
+name: Идея
+description: Предложить изменение поведения или новую возможность.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Перед идеей прочитайте [подход к дизайну](https://github.com/pravoslavnaacerkovukrainy-tech/daylog/blob/main/DESIGN.md) и [CONTRIBUTING.md](https://github.com/pravoslavnaacerkovukrainy-tech/daylog/blob/main/CONTRIBUTING.md).
+        Таймеры, серии, очки, оценки продуктивности, напоминания и адресная книга в проект не входят.
+  - type: textarea
+    id: situation
+    attributes:
+      label: Ситуация
+      description: Что происходит в вашем дне, когда не хватает этой возможности? Без личных подробностей.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Что предлагаете
+    validations:
+      required: true
+  - type: textarea
+    id: ai
+    attributes:
+      label: Данные и ИИ
+      description: Нужно ли что-то отправлять в QwenCloud? Если да, что именно и после какого действия человека.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Как вы справляетесь сейчас
