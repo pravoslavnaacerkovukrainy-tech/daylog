@@ -143,7 +143,7 @@ public struct DiaryDocument: Codable {
         self.version = Self.needsReviewFields(plans) ? 7 : (chaos.isEmpty ? base : 6)
     }
 
-    /// Версия 7 поднимается только реальными данными пересмотра, а не samym фактом блока полей.
+    /// Версия 7 поднимается только реальными данными пересмотра, а не самим фактом блока полей.
     static func needsReviewFields(_ plans: [DayPlan]) -> Bool {
         func filled(_ text: String?) -> Bool {
             guard let text else { return false }
