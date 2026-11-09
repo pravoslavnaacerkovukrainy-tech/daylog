@@ -70,6 +70,13 @@ struct DaylogCommands: Commands {
                 state.requestFocus(.add)
             }
                 .keyboardShortcut("n")
+            // Отдельная быстрая запись хаоса: ⌃⌘N не совпадает с ⌘N, ⇧⌘N, ⌥⌘N и системными сочетаниями.
+            Button("Записать в место хаоса") {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+                state.requestChaosCapture()
+            }
+                .keyboardShortcut("n", modifiers: [.command, .control])
             Button("Новая задача") {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
@@ -136,6 +143,10 @@ struct MenuBarContent: View {
         Button("Новая запись…") {
             showWindow()
             state.requestFocus(.add)
+        }
+        Button("Записать в место хаоса…") {
+            showWindow()
+            state.requestChaosCapture()
         }
         Button("Новая задача…") {
             showWindow()

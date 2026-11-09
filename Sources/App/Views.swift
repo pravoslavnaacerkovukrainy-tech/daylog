@@ -137,10 +137,19 @@ struct ContentView: View {
                 onDelete: deleteKey
             )
         }
-        .sheet(isPresented: Binding(get: { state.daySummary != nil || state.summaryBusy },
+        .sheet(isPresented: Binding(get: { state.summaryPreflight != nil || state.daySummary != nil || state.summaryBusy },
                                     set: { if !$0 { state.clearDaySummary() } })) {
-            DaySummarySheet(summary: state.daySummary, busy: state.summaryBusy,
-                            day: state.selectedDay, onClose: state.clearDaySummary)
+            if let entries = state.summaryPreflight {
+                AIPreflightSheet(
+                    title: "Итог дня за \(DiaryFormat.shortDate(state.selectedDay))",
+                    explanation: "В QwenCloud уйдут только записи этого дня, показанные ниже. План, задачи, заметки и другие дни не отправляются. Итог не записывается в дневник. Условия обработки данных определяет QwenCloud.",
+                    payload: DaySummary.buildDayText(entries),
+                    onCancel: state.clearDaySummary,
+                    onSend: state.confirmDaySummary)
+            } else {
+                DaySummarySheet(summary: state.daySummary, busy: state.summaryBusy,
+                                day: state.selectedDay, onClose: state.clearDaySummary)
+            }
         }
     }
 
@@ -193,7 +202,7 @@ struct ContentView: View {
                 Button { state.summarizeDay() } label: {
                     Label("Итог дня", systemImage: "doc.plaintext")
                 }
-                .help("Спокойный итог дня через QwenCloud (⌥⌘I)")
+                .help("Спокойный итог дня через QwenCloud. Перед отправкой покажу записи (⌥⌘I)")
                 .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             }
         }
@@ -282,8 +291,9 @@ struct ContentView: View {
                 .accessibilityLabel("Поиск по всем дням")
             if state.isSearching {
                 Button { state.searchText = ""; focus = .add } label: {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "xmark.circle.fill").compactHitArea(24)
                 }
+                .padding(.vertical, -5)
                 .buttonStyle(.plain)
                 .foregroundStyle(Theme.quiet)
                 .help("Сбросить поиск (Esc)")
@@ -665,8 +675,9 @@ struct NotesView: View {
                 .accessibilityLabel("Поиск по заметкам")
             if isSearching {
                 Button { state.noteSearchText = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "xmark.circle.fill").compactHitArea(24)
                 }
+                .padding(.vertical, -5)
                 .buttonStyle(.plain)
                 .foregroundStyle(Theme.quiet)
                 .accessibilityLabel("Сбросить поиск")
@@ -839,7 +850,15 @@ struct NoteEditor: View {
         .padding(24)
         .background(Theme.canvas)
         .onAppear { focus = .title }
-        .onDisappear { polishTask?.cancel(); persistIfNeeded() }
+        .onDisappear { polishTask?.cancel(); state.cancelNotePolish(); persistIfNeeded() }
+        .sheet(item: Binding(get: { state.notePolishPreflight }, set: { if $0 == nil { state.cancelNotePolish() } })) { preflight in
+            AIPreflightSheet(
+                title: "Оформить заметку",
+                explanation: "В QwenCloud уйдут только заголовок и текст этого наброска, показанные ниже. Дневник, план и другие заметки не отправляются. Результат появится в редакторе и запишется только после «Сохранить». Условия обработки данных определяет QwenCloud.",
+                payload: preflight.draft,
+                onCancel: state.cancelNotePolish,
+                onSend: sendPolish)
+        }
         .confirmationDialog("Удалить заметку?", isPresented: $confirmDelete) {
             Button("Удалить", role: .destructive, action: delete)
             Button("Отмена", role: .cancel) { }
@@ -851,9 +870,10 @@ struct NoteEditor: View {
     @ViewBuilder
     private var polishControls: some View {
         HStack(spacing: 8) {
-            Button("Оформить", action: beginPolish)
+            Button("Оформить…", action: beginPolish)
                 .disabled(polishDraft.isEmpty || polishBusy || state.isBlocked)
-                .help("В QwenCloud отправятся заголовок и текст текущего наброска; дневник, план и другие заметки не отправляются.")
+                .help("Сначала покажу, что уйдёт в QwenCloud. Отправка только после «Отправить».")
+                .accessibilityHint("Откроет проверку текста перед отправкой в QwenCloud")
             if polishBusy {
                 ProgressView()
                     .controlSize(.small)
@@ -871,13 +891,19 @@ struct NoteEditor: View {
         }
     }
 
+    /// Шаг 1: только показать набросок и получателя. Сети нет.
     private func beginPolish() {
         guard !polishBusy, !state.isBlocked, !polishDraft.isEmpty else { return }
+        state.beginNotePolish(draft: polishDraft)
+    }
+
+    /// Шаг 2, после «Отправить»: уходит показанный текст, заметка не сохраняется сама.
+    private func sendPolish() {
+        guard !polishBusy, state.notePolishPreflight != nil else { return }
         let previous = (title: title, body: text)
-        let draft = polishDraft
         polishBusy = true
         polishTask = Task {
-            let result = await state.polishNote(draft: draft)
+            let result = await state.confirmNotePolish()
             guard !Task.isCancelled else {
                 // Поздний результат отбрасываем, но не оставляем кнопки навсегда занятыми.
                 polishBusy = false
@@ -952,6 +978,9 @@ struct AskView: View {
     @EnvironmentObject var state: AppState
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
+    /// Выбор до согласия: только отметки в интерфейсе, контекст ещё не собирается.
+    @State private var pendingSelection: Set<UUID> = []
+    @State private var showNoteList = false
 
     private var draftIsBlank: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -965,7 +994,8 @@ struct AskView: View {
                         if state.chatMessages.isEmpty {
                             Text(state.sortedNotes.isEmpty
                                  ? "Сначала создайте заметки, чтобы по ним спрашивать"
-                                 : "Спросите что-нибудь о своих заметках…")
+                                 : (state.chatConsentGiven ? "Спросите что-нибудь о выбранных заметках…"
+                                    : "Отметьте заметки внизу и разрешите передачу. До этого ничего не отправляется."))
                                 .font(.title3)
                                 .foregroundStyle(Theme.quiet)
                                 .multilineTextAlignment(.center)
@@ -999,6 +1029,7 @@ struct AskView: View {
 
             Divider()
             VStack(alignment: .leading, spacing: 6) {
+                transferPanel
                 HStack(alignment: .bottom, spacing: 12) {
                     TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
                         .textFieldStyle(.plain)
@@ -1020,18 +1051,18 @@ struct AskView: View {
                             .padding(.bottom, 12)
                             .accessibilityLabel("ИИ отвечает")
                     }
+                    if state.chatBusy {
+                        Button("Отменить запрос") { state.cancelChatRequest() }
+                    }
                     Button("Очистить") { state.clearChat() }
                         .disabled(state.chatBusy || state.chatMessages.isEmpty)
                     Button("Спросить", action: submit)
                         .keyboardShortcut(.return, modifiers: .command)
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.accent)
-                        .disabled(draftIsBlank || state.chatBusy)
+                        .disabled(draftIsBlank || !state.canSendChat)
+                        .accessibilityHint(state.chatConsentGiven ? "Отправить вопрос и выбранные заметки в QwenCloud" : "Сначала разрешите передачу выбранных заметок")
                 }
-                Text("В QwenCloud отправляются все заметки, вопросы и ответы этой беседы; дневник и план не отправляются.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.quiet)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 28)
             .padding(.top, 16)
@@ -1045,10 +1076,122 @@ struct AskView: View {
     }
 
     private func submit() {
-        guard !draftIsBlank, !state.chatBusy else { return }
-        state.sendChat(draft)
-        draft = ""
+        guard !draftIsBlank, state.canSendChat else { return }
+        // Вопрос стирается только если он действительно ушёл.
+        if state.sendChat(draft) { draft = "" }
         inputFocused = true
+    }
+
+    private var allNotes: [DiaryNote] { state.sortedNotes }
+
+    private func noteTitle(_ note: DiaryNote) -> String {
+        note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без заголовка" : note.title
+    }
+
+    /// До согласия: список заметок с отметками и кнопки «Разрешить» / «Отмена».
+    /// После: объём передачи виден прямо в чате, список можно раскрыть и снять отдельные заметки.
+    @ViewBuilder private var transferPanel: some View {
+        if allNotes.isEmpty {
+            HStack(spacing: 12) {
+                Text("Заметок нет. Спрашивать пока не о чем, отправка выключена.")
+                    .font(.callout).foregroundStyle(Theme.quiet)
+                Spacer()
+                Button("Создать заметку") {
+                    state.mode = .notes
+                    state.selectedNoteID = nil
+                    state.noteSearchText = ""
+                    NotificationCenter.default.post(name: .daylogNewNote, object: state)
+                }
+            }
+        } else if !state.chatConsentGiven {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Передача заметок в QwenCloud")
+                    .font(.headline).foregroundStyle(Theme.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Пока вы не разрешите, заметки никуда не отправляются. Получатель: QwenCloud. Уйдут только отмеченные заметки, ваш вопрос и вопросы и ответы этой беседы. Дневник и план не отправляются. Разрешение само ничего не отправляет.")
+                    .font(.caption).foregroundStyle(Theme.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
+                noteChecklist(selection: Binding(get: { pendingSelection }, set: { pendingSelection = $0 }))
+                HStack(spacing: 12) {
+                    Text(volumeText(allNotes.filter { pendingSelection.contains($0.id) }))
+                        .font(.caption).foregroundStyle(Theme.quiet)
+                    Spacer()
+                    Button("Отмена") {
+                        pendingSelection = []
+                        state.revokeChatConsent()
+                    }
+                    Button("Разрешить передачу") {
+                        state.giveChatConsent(selected: pendingSelection)
+                        inputFocused = true
+                    }
+                    .disabled(pendingSelection.isEmpty || state.isBlocked)
+                    .accessibilityHint("Разрешить отправлять отмеченные заметки вместе с вопросом. Вопрос не отправится сам.")
+                }
+            }
+            .onAppear { if pendingSelection.isEmpty { pendingSelection = Set(allNotes.map(\.id)) } }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Text("В QwenCloud уйдут: \(volumeText(state.chatNotesToSend))")
+                        .font(.caption).foregroundStyle(Theme.quiet)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button { showNoteList.toggle() } label: {
+                        Text(showNoteList ? "Скрыть список" : "Выбрать заметки").frame(minHeight: 24).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    Button {
+                        pendingSelection = state.chatSelectedNoteIDs
+                        state.revokeChatConsent()
+                        showNoteList = false
+                    } label: { Text("Отменить передачу").frame(minHeight: 24).contentShape(Rectangle()) }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Отменить передачу")
+                    .accessibilityHint("Прервать запрос и запретить отправку заметок до нового разрешения")
+                }
+                if showNoteList {
+                    noteChecklist(selection: Binding(get: { state.chatSelectedNoteIDs }, set: { state.chatSelectedNoteIDs = $0 }))
+                }
+                if state.chatNotesToSend.isEmpty {
+                    Text("Не отмечено ни одной заметки, отправка выключена.")
+                        .font(.caption).foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    private func volumeText(_ notes: [DiaryNote]) -> String {
+        let chars = NotesChat.numberedNotes(notes).count
+        let over = chars > NotesChat.maxContextCharacters ? " (больше допустимых \(NotesChat.maxContextCharacters))" : ""
+        return "заметок \(notes.count) из \(allNotes.count), \(chars) знаков\(over), плюс вопрос и эта беседа"
+    }
+
+    @ViewBuilder private func noteChecklist(selection: Binding<Set<UUID>>) -> some View {
+        // Короткий список без прокрутки, длинный в ограниченной области.
+        if allNotes.count <= 5 {
+            noteChecklistRows(selection: selection)
+        } else {
+            ScrollView { noteChecklistRows(selection: selection) }.frame(maxHeight: 140)
+        }
+    }
+
+    private func noteChecklistRows(selection: Binding<Set<UUID>>) -> some View {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(allNotes) { note in
+                    Toggle(isOn: Binding(
+                        get: { selection.wrappedValue.contains(note.id) },
+                        set: { on in
+                            if on { selection.wrappedValue.insert(note.id) } else { selection.wrappedValue.remove(note.id) }
+                        })) {
+                        Text("\(noteTitle(note)) · \(note.body.count) знаков").lineLimit(1)
+                    }
+                    .toggleStyle(QuietCheckboxStyle())
+                    .frame(minHeight: 24)
+                    .disabled(state.chatBusy)
+                    .accessibilityLabel("Передавать заметку «\(noteTitle(note))»")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1078,7 +1221,9 @@ private struct ChatBubble: View {
                                             .lineLimit(1)
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
+                                            .frame(minHeight: 24)
                                             .background(Capsule().fill(Theme.accent.opacity(0.12)))
+                                            .contentShape(Capsule())
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundStyle(Theme.accent)
@@ -1145,17 +1290,18 @@ struct EntryRow: View {
                 }
             }
             Spacer(minLength: 8)
-            HStack(spacing: 10) {
+            HStack(spacing: 4) {
                 if let open = onOpenDay {
                     Button("К дню", action: open).help("Открыть этот день")
                 }
-                Button(action: onEdit) { Image(systemName: "pencil") }
+                Button(action: onEdit) { Image(systemName: "pencil").compactHitArea() }
                     .help("Изменить")
                     .accessibilityLabel("Изменить запись")
-                Button(action: onDelete) { Image(systemName: "trash") }
+                Button(action: onDelete) { Image(systemName: "trash").compactHitArea() }
                     .help("Удалить…")
                     .accessibilityLabel("Удалить запись")
             }
+            .padding(.vertical, -6)
             .buttonStyle(.borderless)
             .foregroundStyle(Theme.quiet)
             .opacity(hovering ? 1 : 0.35)
@@ -1300,6 +1446,58 @@ private struct PolishConfirmSheet: View {
         .padding(20)
         .frame(width: 460)
         .interactiveDismissDisabled(busy)
+    }
+}
+
+/// Проверка перед отправкой в ИИ: фактический текст, получатель, «Отправить» и «Отмена».
+/// До «Отправить» запросов нет; «Отмена» ничего не меняет.
+struct AIPreflightSheet: View {
+    let title: String
+    let explanation: String
+    let payload: String
+    let onCancel: () -> Void
+    let onSend: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(.title2.bold())
+                .foregroundStyle(Theme.ink)
+                .accessibilityAddTraits(.isHeader)
+            Text("Получатель: QwenCloud")
+                .font(.headline)
+                .foregroundStyle(Theme.ink)
+            Text(explanation)
+                .font(.callout)
+                .foregroundStyle(Theme.quiet)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Будет отправлено (\(payload.count) знаков):")
+                .font(.caption)
+                .foregroundStyle(Theme.quiet)
+            ScrollView {
+                Text(payload)
+                    .foregroundStyle(Theme.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(minHeight: 80, maxHeight: 280)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Текст для отправки")
+            .accessibilityValue(payload)
+            HStack {
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Отправить", action: onSend)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityHint("Отправить показанный текст в QwenCloud")
+            }
+        }
+        .padding(20)
+        .frame(width: 500)
     }
 }
 

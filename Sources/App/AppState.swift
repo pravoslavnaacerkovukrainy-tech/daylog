@@ -30,9 +30,39 @@ enum UndoAction: Equatable {
     }
 }
 
+/// Сетевые операции ИИ. Вызываются только после явного согласия в интерфейсе.
+/// В тестах подменяются шпионами: без ключа, без сети, без настоящих записей.
+struct AIServices {
+    var polishNote: (_ draft: String) async throws -> (title: String, body: String)
+    var summarizeDay: (_ entries: [DiaryEntry]) async throws -> String
+    var askNotes: (_ notes: [DiaryNote], _ history: [ChatMessage], _ question: String) async throws -> (answer: String, sources: [Int])
+
+    static let live = AIServices(
+        polishNote: { draft in
+            guard let key = QwenKeyStore.resolve() else { throw DraftPolishError.noKey }
+            return try await NotePolishClient().polish(draft: draft, apiKey: key)
+        },
+        summarizeDay: { entries in
+            guard let key = QwenKeyStore.resolve() else { throw DraftPolishError.noKey }
+            return try await DaySummaryClient().summarize(entries: entries, apiKey: key)
+        },
+        askNotes: { notes, history, question in
+            guard let key = QwenKeyStore.resolve() else { throw DraftPolishError.noKey }
+            return try await NotesChatClient().ask(notes: notes, history: history, question: question, apiKey: key)
+        }
+    )
+}
+
+/// Что именно уйдёт в QwenCloud по «Оформить» у заметки. Отправляется только после «Отправить».
+struct NotePolishPreflight: Identifiable, Equatable {
+    let id = UUID()
+    let draft: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let store: DiaryStore
+    private let ai: AIServices
 
     @Published private(set) var entries: [DiaryEntry] = []
     @Published private(set) var plans: [DayPlan] = []
@@ -52,6 +82,12 @@ final class AppState: ObservableObject {
     }
 
     @Published var organizerCaptureText = ""
+    /// Команда «Записать в место хаоса»: раздел дел открывается на месте хаоса с фокусом в поле.
+    @Published var chaosCaptureRequested = false
+    /// Счётчик для уже открытого раздела: повторная команда снова ставит фокус.
+    @Published private(set) var chaosCaptureToken = 0
+    /// Раздел «Дел», который человек выбрал в этом профиле. nil, пока выбора не было.
+    @Published private(set) var savedOrganizerSection: String?
     @Published var mode: AppMode = .organizer
     @Published var taskCreationRequested = false
     @Published var chatMessages: [ChatMessage] = []
@@ -60,7 +96,15 @@ final class AppState: ObservableObject {
     /// Одноразовый итог текущего дня (приложение не сохраняет; живёт, пока открыт sheet).
     @Published private(set) var daySummary: String?
     @Published private(set) var summaryBusy: Bool = false
+    /// Записи дня, показанные перед отправкой итога. Сеть только после confirmDaySummary().
+    @Published private(set) var summaryPreflight: [DiaryEntry]?
     private var summaryTask: Task<Void, Never>?
+    /// Показанный набросок заметки перед «Оформить». Сеть только после confirmNotePolish().
+    @Published private(set) var notePolishPreflight: NotePolishPreflight?
+    /// Явное согласие передавать выбранные заметки в QwenCloud. Живёт до выхода из приложения.
+    @Published private(set) var chatConsentGiven = false
+    /// Заметки, которые человек оставил отмеченными для чата.
+    @Published var chatSelectedNoteIDs: Set<UUID> = []
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
@@ -73,14 +117,49 @@ final class AppState: ObservableObject {
     @Published private(set) var focusRequest: FocusTarget?
     @Published private(set) var focusToken: Int = 0
 
-    init(store: DiaryStore = DiaryStore(directory: DiaryStore.defaultDirectory())) {
+    init(store: DiaryStore = DiaryStore(directory: DiaryStore.defaultDirectory()), ai: AIServices = .live) {
         self.store = store
+        self.ai = ai
         do {
             try store.load()
         } catch {
             errorMessage = nil // причина показывается отдельной плашкой блокировки
         }
+        savedOrganizerSection = Self.readUIState(at: uiStateURL)?.organizerSection
         refresh()
+    }
+
+    // MARK: Раздел «Дел» этого профиля
+
+    static let uiStateFileName = "ui-state.json"
+    private var uiStateURL: URL { store.directory.appendingPathComponent(Self.uiStateFileName) }
+
+    private struct UIState: Codable { var organizerSection: String? }
+
+    private static func readUIState(at url: URL) -> UIState? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(UIState.self, from: data)
+    }
+
+    /// Запоминает раздел, выбранный человеком. Хранится рядом с данными профиля, отдельно от дневника.
+    func rememberOrganizerSection(_ raw: String) {
+        guard savedOrganizerSection != raw else { return }
+        savedOrganizerSection = raw
+        guard !isBlocked else { return }
+        do {
+            try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(UIState(organizerSection: raw))
+            try data.write(to: uiStateURL, options: .atomic)
+        } catch {
+            // Раздел не критичен: дневник и задачи от этого не зависят.
+        }
+    }
+
+    /// Открыть «Дела → Место хаоса» и поставить фокус в поле. Черновик не трогается, запись не создаётся.
+    func requestChaosCapture() {
+        mode = .organizer
+        chaosCaptureRequested = true
+        chaosCaptureToken += 1
     }
 
     private func refresh() {
@@ -336,15 +415,26 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// «Оформить» в редакторе заметки: набросок → заголовок и тело через QwenCloud.
-    /// Заметку всегда можно сохранить и без сети — ошибка ИИ не блокирует редактирование.
-    func polishNote(draft: String) async -> (title: String, body: String)? {
-        guard let key = QwenKeyStore.resolve() else {
-            showError(DraftPolishError.noKey.localizedDescription)
-            return nil
-        }
+    /// «Оформить» в редакторе заметки, шаг 1: только показать, что уйдёт в QwenCloud. Сети нет.
+    func beginNotePolish(draft: String) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isBlocked else { return }
+        notePolishPreflight = NotePolishPreflight(draft: draft)
+    }
+
+    func cancelNotePolish() {
+        notePolishPreflight = nil
+    }
+
+    /// Шаг 2, после «Отправить»: уходит ровно показанный текст. Заметку сохраняет только человек.
+    /// Ошибка ИИ не трогает заметку: результат nil, исходный текст остаётся в редакторе.
+    func confirmNotePolish() async -> (title: String, body: String)? {
+        guard let preflight = notePolishPreflight else { return nil }
+        notePolishPreflight = nil
         do {
-            return try await NotePolishClient().polish(draft: draft, apiKey: key)
+            return try await ai.polishNote(preflight.draft)
+        } catch is CancellationError {
+            return nil
         } catch {
             showError(error.localizedDescription)
             return nil
@@ -353,26 +443,54 @@ final class AppState: ObservableObject {
 
     // MARK: Notes chat
 
-    func sendChat(_ question: String) {
+    /// Заметки, которые уйдут с вопросом: только отмеченные и только после согласия.
+    var chatNotesToSend: [DiaryNote] {
+        _ = notes
+        guard chatConsentGiven else { return [] }
+        return store.sortedNotes().filter { chatSelectedNoteIDs.contains($0.id) }
+    }
+
+    /// Объём контекста заметок в знаках, как он уйдёт в запрос.
+    var chatContextCharacters: Int { NotesChat.numberedNotes(chatNotesToSend).count }
+
+    /// Согласие на передачу. Само ничего не отправляет: вопрос уходит отдельным «Спросить».
+    func giveChatConsent(selected: Set<UUID>) {
+        let existing = Set(store.notes.map(\.id))
+        chatSelectedNoteIDs = selected.intersection(existing)
+        chatConsentGiven = true
+    }
+
+    /// Отменить передачу: идущий запрос прерывается, новые не уходят до нового согласия.
+    func revokeChatConsent() {
+        cancelChatRequest()
+        chatConsentGiven = false
+        chatSelectedNoteIDs = []
+    }
+
+    func setChatNote(_ id: UUID, selected: Bool) {
+        if selected { chatSelectedNoteIDs.insert(id) } else { chatSelectedNoteIDs.remove(id) }
+    }
+
+    var canSendChat: Bool { chatConsentGiven && !chatNotesToSend.isEmpty && !chatBusy && !isBlocked }
+
+    @discardableResult
+    func sendChat(_ question: String) -> Bool {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
-        guard !chatBusy else { return }
+        guard !q.isEmpty else { return false }
+        guard !chatBusy, !isBlocked else { return false }
+        // Без явного согласия и выбранных заметок контекст не собирается и не отправляется.
+        guard chatConsentGiven else { return false }
+        // Снимок выбранных заметок: по нему и уходит запрос, и разрешаются номера источников,
+        // чтобы правка/удаление заметок во время запроса не сбивала ссылки.
+        let notesSnapshot = chatNotesToSend
+        guard !notesSnapshot.isEmpty else { return false }
         chatMessages.append(ChatMessage(role: .user, text: q))
         let history = Array(chatMessages.dropLast())
-        // Снимок заметок: по нему и уходит запрос, и разрешаются номера источников,
-        // чтобы правка/удаление заметок во время запроса не сбивала ссылки.
-        let notesSnapshot = store.notes
         chatBusy = true
+        let ask = ai.askNotes
         chatTask = Task { @MainActor in
-            guard let key = QwenKeyStore.resolve() else {
-                showError(DraftPolishError.noKey.localizedDescription)
-                chatBusy = false
-                return
-            }
             do {
-                let (answer, nums) = try await NotesChatClient().ask(
-                    notes: notesSnapshot, history: history, question: q, apiKey: key
-                )
+                let (answer, nums) = try await ask(notesSnapshot, history, q)
                 // Задачу могли отменить (clearChat) уже после ответа — не пишем в очищенную ленту.
                 if Task.isCancelled { return }
                 let valid = NotesChat.resolveSources(nums, noteCount: notesSnapshot.count)
@@ -393,6 +511,14 @@ final class AppState: ObservableObject {
             }
             chatBusy = false
         }
+        return true
+    }
+
+    /// Прервать идущий запрос, не очищая беседу.
+    func cancelChatRequest() {
+        chatTask?.cancel()
+        chatTask = nil
+        chatBusy = false
     }
 
     func clearChat() {
@@ -403,25 +529,29 @@ final class AppState: ObservableObject {
 
     // MARK: Итог дня
 
-    /// Спокойный итог прожитого дня по его записям, через QwenCloud. По явному действию.
+    /// Спокойный итог прожитого дня, шаг 1: показать записи и получателя. Сети нет.
     /// Отправляются только записи выбранного дня; план и другие дни — нет. Ответ приложение не сохраняет.
     func summarizeDay() {
-        guard !summaryBusy else { return }
-        // Снимок записей дня: по нему и уходит запрос, правки во время запроса не влияют.
+        guard !summaryBusy, !isBlocked else { return }
+        // Снимок записей дня: ровно он показывается и уходит после «Отправить».
         let snapshot = dayEntries
         guard !snapshot.isEmpty else {
-            showDraftStatus("За этот день записей нет — нечего подытоживать.")
+            showDraftStatus("За этот день записей нет - нечего подытоживать.")
             return
         }
+        daySummary = nil
+        summaryPreflight = snapshot
+    }
+
+    /// Шаг 2, после «Отправить»: уходит показанный снимок, а не текущее состояние дня.
+    func confirmDaySummary() {
+        guard !summaryBusy, let snapshot = summaryPreflight else { return }
+        summaryPreflight = nil
         summaryBusy = true
+        let summarize = ai.summarizeDay
         summaryTask = Task { @MainActor in
-            guard let key = QwenKeyStore.resolve() else {
-                showError(DraftPolishError.noKey.localizedDescription)
-                summaryBusy = false
-                return
-            }
             do {
-                let text = try await DaySummaryClient().summarize(entries: snapshot, apiKey: key)
+                let text = try await summarize(snapshot)
                 if Task.isCancelled { return }
                 daySummary = text
             } catch is CancellationError {
@@ -439,6 +569,7 @@ final class AppState: ObservableObject {
     func clearDaySummary() {
         summaryTask?.cancel()
         summaryBusy = false
+        summaryPreflight = nil
         daySummary = nil
     }
 

@@ -45,7 +45,9 @@ private struct ProjectSheet: Identifiable {
 
 struct OrganizerView: View {
     @ObservedObject var state: AppState
-    @State private var section: OrganizerSection? = .today
+    /// Новый профиль открывает место хаоса; выбранный человеком раздел восстанавливается.
+    @State private var section: OrganizerSection?
+    @FocusState private var captureFocused: Bool
     @State private var scope: OrganizerArea = .all
     @State private var query = ""
     @State private var taskSheet: TaskSheet?
@@ -62,7 +64,13 @@ struct OrganizerView: View {
     @State private var deletingProject: DiaryProject?
     @State private var now = Date()
 
-    private var current: OrganizerSection { section ?? .today }
+    init(state: AppState) {
+        self.state = state
+        let saved = state.savedOrganizerSection.flatMap(OrganizerSection.init(rawValue:))
+        _section = State(initialValue: saved ?? .inbox)
+    }
+
+    private var current: OrganizerSection { section ?? .inbox }
     private var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var visibleProjects: [DiaryProject] {
         state.projects.filter { scope.includes($0.area) && ($0.archived == showArchived) }
@@ -129,16 +137,23 @@ struct OrganizerView: View {
         .onChange(of: section) { _, value in
             if value != .projects { selectedProjectID = nil }
             query = ""
+            // Черновик поля и строки хаоса живут в AppState и при смене раздела не очищаются.
+            if let value { state.rememberOrganizerSection(value.rawValue) }
         }
         .onChange(of: scope) { _, value in
             if let project = selectedProject, !value.includes(project.area) { selectedProjectID = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in now = Date() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in now = Date() }
-        .onAppear(perform: handleTaskCreationRequest)
+        .onAppear {
+            handleTaskCreationRequest()
+            if state.chaosCaptureRequested { handleChaosCaptureRequest() }
+            else if current == .inbox { focusCapture() }
+        }
         .onChange(of: state.taskCreationRequested) { _, requested in
             if requested { handleTaskCreationRequest() }
         }
+        .onChange(of: state.chaosCaptureToken) { _, _ in handleChaosCaptureRequest() }
         .sheet(item: $taskSheet) { sheet in
             OrganizerTaskEditor(state: state, task: sheet.task, projectID: sheet.projectID,
                                 area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay,
@@ -257,6 +272,8 @@ struct OrganizerView: View {
                 HStack {
                     TextField("Задача, заметка или идея", text: $state.organizerCaptureText).onSubmit(capture)
                         .textFieldStyle(.roundedBorder)
+                        .focused($captureFocused)
+                        .accessibilityLabel("Быстрая запись в место хаоса")
                     Button("Записать", action: capture)
                         .disabled(state.organizerCaptureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
                 }.padding(.horizontal, 20).padding(.vertical, 12)
@@ -334,7 +351,7 @@ struct OrganizerView: View {
             Text(emptyDetail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
             if current == .today {
-                Button("Открыть место хаоса") { section = .inbox }
+                Button("Открыть место хаоса") { section = .inbox; focusCapture() }
             }
         }.padding(24)
     }
@@ -371,7 +388,8 @@ struct OrganizerView: View {
             } label: {
                 Image(systemName: task.isCompleted ? "checkmark.circle.fill" : (task.isRemoved ? "xmark.circle" : "circle"))
                     .font(.system(size: 20)).foregroundStyle(task.isCompleted ? Color.accentColor : Color.secondary)
-            }.buttonStyle(.plain).padding(.top, 2).disabled(state.isBlocked || task.isRemoved)
+                    .compactHitArea()
+            }.buttonStyle(.plain).padding(.top, -2).disabled(state.isBlocked || task.isRemoved)
                 .accessibilityLabel(task.isCompleted ? "Вернуть задачу: \(task.text)" : "Выполнить задачу: \(task.text)")
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -379,8 +397,9 @@ struct OrganizerView: View {
                         .onTapGesture { if task.isOpen { edit(task) } }
                     Spacer(minLength: 8)
                     if task.isOpen {
-                        Button { edit(task) } label: { Image(systemName: "ellipsis") }
+                        Button { edit(task) } label: { Image(systemName: "ellipsis").compactHitArea() }
                             .buttonStyle(.borderless).accessibilityLabel("Изменить задачу: \(task.text)")
+                            .help("Изменить задачу")
                     }
                 }
                 HStack(spacing: 10) {
@@ -413,8 +432,11 @@ struct OrganizerView: View {
                     Text("Выполнено шагов: \(task.taskSteps.filter(\.isCompleted).count) из \(task.taskSteps.count)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Button(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги") { breakdownTask = task }
+                Button { breakdownTask = task } label: {
+                    Text(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги").frame(minHeight: 24).contentShape(Rectangle())
+                }
                     .buttonStyle(.borderless).disabled(state.isBlocked)
+                    .padding(.vertical, -4)
                 if !task.day.isEmpty { Text("День работы · \(task.day)").font(.caption).foregroundStyle(.secondary) }
                 if let deadline = task.organization?.deadline {
                     Label("Срок · \(DiaryFormat.shortDate(deadline))", systemImage: "flag")
@@ -620,6 +642,17 @@ struct OrganizerView: View {
         guard !state.isBlocked, taskSheet == nil, projectSheet == nil else { return }
         newTask(project: selectedProject)
     }
+    /// Команда «Записать в место хаоса»: только навигация и фокус, черновик остаётся как есть.
+    private func handleChaosCaptureRequest() {
+        state.chaosCaptureRequested = false
+        query = ""
+        if section != .inbox { section = .inbox }
+        focusCapture()
+    }
+    private func focusCapture() {
+        // Поле появляется после перестройки списка раздела, поэтому фокус ставится следующим проходом.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { captureFocused = true }
+    }
     private func edit(_ task: DayPlan) {
         taskSheet = TaskSheet(task: task, projectID: task.projectID, area: task.taskArea, status: task.taskStatus)
     }
@@ -670,6 +703,10 @@ private struct OrganizerTaskEditor: View {
     @State private var review: Date
     @State private var saveError: String?
     @State private var showSteps = false
+    /// «Дополнительно» свёрнуто по умолчанию; значения полей живут в @State и при сворачивании не теряются.
+    @State private var showAdvanced: Bool
+    /// Защита от второго нажатия «Сохранить» до закрытия листа.
+    @State private var didSave = false
 
     init(state: AppState, task: DayPlan?, projectID: UUID?, area: TaskArea, status: TaskStatus,
          plannedDay: Date?, chaosItem: ChaosItem? = nil, atRisk: Bool = false) {
@@ -692,6 +729,21 @@ private struct OrganizerTaskEditor: View {
         _deadline = State(initialValue: metadata?.deadline ?? Date())
         _hasReview = State(initialValue: metadata?.reviewDate != nil)
         _review = State(initialValue: metadata?.reviewDate ?? Date())
+        _showAdvanced = State(initialValue: false)
+    }
+
+    /// Что уже задано в свёрнутом блоке: видно без разворачивания, в том числе у существующей задачи.
+    private var advancedSummary: [String] {
+        var parts: [String] = []
+        if let project = state.projects.first(where: { $0.id == projectID }) { parts.append("Проект: \(project.title)") }
+        if status != .ready { parts.append(status.title) }
+        if !promisedTo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append("Обещано: \(promisedTo)") }
+        if atRisk { parts.append("Под угрозой") }
+        if planned { parts.append("День: \(DiaryFormat.shortDate(day))") }
+        if hasDeadline { parts.append("Срок: \(DiaryFormat.shortDate(deadline))") }
+        if hasReview { parts.append("Пересмотр: \(DiaryFormat.shortDate(review))") }
+        if !details.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append("Есть заметка") }
+        return parts
     }
 
     var body: some View {
@@ -706,6 +758,49 @@ private struct OrganizerTaskEditor: View {
                     }
                     Picker("Сфера", selection: $area) { ForEach(TaskArea.allCases) { Text($0.title).tag($0) } }
                         .disabled(projectID != nil)
+                }
+                Section {
+                    Button { showAdvanced.toggle() } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: showAdvanced ? "chevron.down" : "chevron.right")
+                                .font(.caption.weight(.semibold)).frame(width: 12)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Дополнительно").foregroundStyle(.primary)
+                                Text(advancedSummary.isEmpty ? "Проект, состояние, обещание, даты, заметка. Необязательно."
+                                     : advancedSummary.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            Spacer(minLength: 0)
+                        }.frame(minHeight: 28).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Дополнительно")
+                    .accessibilityValue(showAdvanced ? "развёрнуто" : "свёрнуто")
+                    .accessibilityHint(advancedSummary.isEmpty ? "Необязательные поля задачи" : advancedSummary.joined(separator: ", "))
+                }
+                // Свёрнутый блок убран из иерархии целиком: фокус клавиатуры и VoiceOver в него не попадают.
+                if showAdvanced { advancedSections }
+            }.formStyle(.grouped)
+            if let error = saveError { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled).padding(.horizontal, 20) }
+            HStack {
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Сохранить", action: save).keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked || didSave)
+            }.padding(20)
+        }.frame(width: 540, height: showAdvanced ? 650 : 400)
+            .sheet(isPresented: $showSteps) {
+                if let task, let current = state.plans.first(where: { $0.id == task.id }) {
+                    TaskBreakdownView(state: state, draft: state.breakdownDraft(for: current))
+                }
+            }
+            .onChange(of: projectID) { _, id in
+                if let project = state.projects.first(where: { $0.id == id }) { area = project.area }
+            }
+    }
+
+    @ViewBuilder private var advancedSections: some View {
+                Section {
                     Picker("Проект", selection: $projectID) {
                         Text("Без проекта").tag(nil as UUID?)
                         ForEach(state.projects.filter { !$0.archived }) { Text("\($0.title) · \($0.area.title)").tag(Optional($0.id)) }
@@ -750,26 +845,10 @@ private struct OrganizerTaskEditor: View {
                         }
                         .accessibilityLabel("Заметка к задаче")
                 }
-            }.formStyle(.grouped)
-            if let error = saveError { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled).padding(.horizontal, 20) }
-            HStack {
-                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Сохранить", action: save).keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
-            }.padding(20)
-        }.frame(width: 540, height: 650)
-            .sheet(isPresented: $showSteps) {
-                if let task, let current = state.plans.first(where: { $0.id == task.id }) {
-                    TaskBreakdownView(state: state, draft: state.breakdownDraft(for: current))
-                }
-            }
-            .onChange(of: projectID) { _, id in
-                if let project = state.projects.first(where: { $0.id == id }) { area = project.area }
-            }
     }
 
     private func save() {
+        guard !didSave else { return }
         let metadata = TaskOrganization(area: area, projectID: projectID, status: status, waitingFor: waitingFor,
                                         promisedTo: promisedTo, atRisk: atRisk,
                                         reviewDate: hasReview ? review : nil, deadline: hasDeadline ? deadline : nil,
@@ -784,7 +863,14 @@ private struct OrganizerTaskEditor: View {
                 _ = try state.store.addTask(text: text, plannedDay: planned ? day : nil, organization: metadata)
             }
         }
-        if success { dismiss() } else { saveError = state.errorMessage }
+        if success { didSave = true; dismiss() } else { saveError = state.errorMessage }
+    }
+}
+
+extension View {
+    /// Область нажатия компактной кнопки 28×28 pt; иконка остаётся прежнего размера.
+    func compactHitArea(_ side: CGFloat = 28) -> some View {
+        frame(width: side, height: side).contentShape(Rectangle())
     }
 }
 

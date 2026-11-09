@@ -2104,5 +2104,167 @@ test("Пересмотр контекста сохраняет ручные пр
     }
 }
 
+// MARK: P1: раздел дел, быстрая запись хаоса, preflight ИИ и согласие чата
+
+/// Шпион вместо QwenCloud: считает вызовы и запоминает, что ушло бы в запрос. Ключ и сеть не нужны.
+@MainActor
+final class AISpy {
+    var polished: [String] = []
+    var summarized: [[DiaryEntry]] = []
+    var asked: [(notes: [DiaryNote], history: [ChatMessage], question: String)] = []
+    var failure: Error?
+    var calls: Int { polished.count + summarized.count + asked.count }
+    var services: AIServices {
+        AIServices(
+            polishNote: { [unowned self] draft in
+                self.polished.append(draft)
+                if let failure = self.failure { throw failure }
+                return ("Заголовок", "Тело")
+            },
+            summarizeDay: { [unowned self] entries in
+                self.summarized.append(entries)
+                if let failure = self.failure { throw failure }
+                return "Условный итог"
+            },
+            askNotes: { [unowned self] notes, history, question in
+                self.asked.append((notes, history, question))
+                if let failure = self.failure { throw failure }
+                return ("Ответ [1]", [1])
+            })
+    }
+}
+
+@MainActor
+func pumpMain(_ until: () -> Bool) {
+    let deadline = Date().addingTimeInterval(3)
+    while !until() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.005)) }
+    check(until(), "асинхронное состояние достигнуто")
+}
+
+test("P1-01: раздел дел запоминается для профиля, новый профиль без ключа") {
+    try MainActor.assumeIsolated {
+        let dir = freshDir("p1-section")
+        let fresh = AppState(store: DiaryStore(directory: dir), ai: AISpy().services)
+        check(fresh.savedOrganizerSection == nil, "новый профиль: сохранённого раздела нет, прежний не выдумывается")
+        check(!fm.fileExists(atPath: dir.appendingPathComponent(AppState.uiStateFileName).path), "без выбора человека файл раздела не создаётся")
+        fresh.organizerCaptureText = "Черновик строки"
+        _ = fresh.changeOrganizer("Записано") { _ = try fresh.store.addChaosItem(text: "Строка хаоса") }
+        fresh.rememberOrganizerSection("Проекты")
+        check(fresh.organizerCaptureText == "Черновик строки" && fresh.chaos.count == 1, "смена раздела не очищает черновик и записанные строки")
+        let reopened = AppState(store: DiaryStore(directory: dir), ai: AISpy().services)
+        check(reopened.savedOrganizerSection == "Проекты", "выбранный раздел восстанавливается при следующем запуске профиля")
+        check(reopened.chaos.count == 1 && reopened.chaos[0].text == "Строка хаоса", "данные профиля не затронуты файлом раздела")
+        let json = try String(contentsOf: dir.appendingPathComponent(DiaryStore.fileName), encoding: .utf8)
+        check(!json.contains("Проекты"), "раздел не пишется в файл дневника")
+        let other = AppState(store: DiaryStore(directory: freshDir("p1-section-other")), ai: AISpy().services)
+        check(other.savedOrganizerSection == nil, "другой профиль не получает чужой раздел")
+    }
+}
+
+test("P1-02: команда быстрой записи хаоса только открывает поле") {
+    MainActor.assumeIsolated {
+        let state = AppState(store: DiaryStore(directory: freshDir("p1-capture")), ai: AISpy().services)
+        state.mode = .day
+        state.organizerCaptureText = "Недописанная мысль"
+        let token = state.chaosCaptureToken
+        state.requestChaosCapture()
+        check(state.mode == .organizer && state.chaosCaptureRequested && state.chaosCaptureToken == token + 1, "команда открывает дела и место хаоса")
+        check(state.organizerCaptureText == "Недописанная мысль" && state.chaos.isEmpty, "черновик не затирается, пустая запись не создаётся")
+        for mode in [AppMode.notes, .ask, .organizer] {
+            state.mode = mode
+            state.requestChaosCapture()
+            check(state.mode == .organizer, "команда работает из любого режима")
+        }
+        check(state.chaos.isEmpty && state.entries.isEmpty, "команда ничего не записывает")
+    }
+}
+
+test("P1-05: «Оформить» и итог дня молчат до «Отправить»") {
+    try MainActor.assumeIsolated {
+        let spy = AISpy()
+        let state = AppState(store: DiaryStore(directory: freshDir("p1-preflight")), ai: spy.services)
+        check(state.addNote(title: "Набросок", body: "сырой текст"), "заметка создана")
+        let noteBefore = state.notes
+        state.beginNotePolish(draft: "Набросок\n\nсырой текст")
+        check(state.notePolishPreflight?.draft == "Набросок\n\nсырой текст" && spy.calls == 0, "preflight показывает текст без запроса")
+        state.cancelNotePolish()
+        check(state.notePolishPreflight == nil && spy.calls == 0 && state.notes == noteBefore, "«Отмена» не отправляет и не меняет заметку")
+        state.beginNotePolish(draft: "Показанный текст")
+        check(state.notePolishPreflight != nil && spy.calls == 0, "повтор снова открывает preflight")
+        var result: (title: String, body: String)?
+        var finished = false
+        Task { @MainActor in result = await state.confirmNotePolish(); finished = true }
+        pumpMain { finished }
+        check(spy.polished == ["Показанный текст"] && result?.body == "Тело", "после согласия уходит ровно показанный текст")
+        check(state.notes == noteBefore, "результат не записывается в заметку без «Сохранить»")
+        finished = false
+        Task { @MainActor in result = await state.confirmNotePolish(); finished = true }
+        pumpMain { finished }
+        check(spy.polished.count == 1 && result == nil, "без нового preflight повторной отправки нет")
+        spy.failure = DraftPolishError.noKey
+        state.beginNotePolish(draft: "Ещё текст")
+        finished = false
+        Task { @MainActor in result = await state.confirmNotePolish(); finished = true }
+        pumpMain { finished }
+        check(result == nil && state.errorMessage != nil && state.notes == noteBefore, "ошибка не уничтожает заметку")
+        spy.failure = nil
+
+        let today = Date()
+        check(state.add(text: "Первая запись", context: nil, timestamp: today), "запись дня")
+        let callsBefore = spy.calls
+        state.summarizeDay()
+        check(state.summaryPreflight?.count == 1 && !state.summaryBusy && spy.calls == callsBefore, "итог дня: сначала показ записей, без запроса")
+        state.clearDaySummary()
+        check(state.summaryPreflight == nil && spy.calls == callsBefore && state.entries.count == 1, "«Отмена» итога ничего не отправляет и не меняет")
+        state.summarizeDay()
+        let shown = state.summaryPreflight ?? []
+        _ = try state.store.add(text: "Запись после показа", context: nil, at: today)
+        state.confirmDaySummary()
+        pumpMain { !state.summaryBusy }
+        check(spy.summarized.count == 1 && spy.summarized[0].map(\.id) == shown.map(\.id), "уходит только показанный снимок")
+        check(state.daySummary == "Условный итог" && state.store.entries.count == 2, "итог показан, дневник не тронут")
+        state.confirmDaySummary()
+        check(spy.summarized.count == 1, "повторное подтверждение без preflight не отправляет")
+        spy.failure = DraftPolishError.http(500, "сбой")
+        state.summarizeDay()
+        state.confirmDaySummary()
+        pumpMain { !state.summaryBusy }
+        check(state.errorMessage != nil && state.store.entries.count == 2, "ошибка итога не трогает записи")
+    }
+}
+
+test("P1-06: чат без согласия молчит, уходят только выбранные заметки") {
+    try MainActor.assumeIsolated {
+        let spy = AISpy()
+        let empty = AppState(store: DiaryStore(directory: freshDir("p1-chat-empty")), ai: spy.services)
+        empty.giveChatConsent(selected: [])
+        check(!empty.canSendChat && !empty.sendChat("Вопрос") && spy.calls == 0, "без заметок отправка выключена")
+
+        let state = AppState(store: DiaryStore(directory: freshDir("p1-chat")), ai: spy.services)
+        check(state.addNote(title: "Альфа", body: "условный текст альфа"), "заметка A")
+        check(state.addNote(title: "Бета", body: "ЛИЧНОЕ-НЕ-ВЫБРАНО"), "заметка B")
+        check(state.addNote(title: "Гамма", body: "условный текст гамма"), "заметка C")
+        let byTitle = Dictionary(uniqueKeysWithValues: state.notes.map { ($0.title, $0.id) })
+        check(!state.sendChat("Что в заметках?") && spy.calls == 0 && state.chatMessages.isEmpty, "без согласия вопрос не уходит и контекст не собирается")
+        check(state.chatNotesToSend.isEmpty, "до согласия контекст пуст")
+        state.giveChatConsent(selected: [byTitle["Альфа"]!, byTitle["Бета"]!, byTitle["Гамма"]!])
+        check(spy.calls == 0 && state.chatMessages.isEmpty, "согласие само ничего не отправляет")
+        state.setChatNote(byTitle["Бета"]!, selected: false)
+        check(state.chatContextCharacters == NotesChat.numberedNotes(state.chatNotesToSend).count && state.chatNotesToSend.count == 2, "объём считается по выбранным")
+        check(state.sendChat("Что в заметках?"), "вопрос отправлен")
+        pumpMain { !state.chatBusy }
+        check(spy.asked.count == 1 && spy.asked[0].question == "Что в заметках?", "ушёл вопрос")
+        let sentIDs = Set(spy.asked[0].notes.map(\.id))
+        check(sentIDs == [byTitle["Альфа"]!, byTitle["Гамма"]!], "ушли только выбранные заметки")
+        let body = String(decoding: try NotesChat.requestBody(notes: spy.asked[0].notes, history: spy.asked[0].history, question: spy.asked[0].question), as: UTF8.self)
+        check(!body.contains("ЛИЧНОЕ-НЕ-ВЫБРАНО") && body.contains("условный текст альфа"), "невыбранная заметка отсутствует в теле запроса")
+        check(state.chatMessages.last?.sourceNoteIDs == [spy.asked[0].notes[0].id], "источник разрешается по отправленному снимку")
+        state.revokeChatConsent()
+        check(!state.sendChat("Ещё вопрос") && spy.asked.count == 1, "после отмены передачи сеть невозможна")
+        state.giveChatConsent(selected: [])
+        check(!state.canSendChat && !state.sendChat("Ещё вопрос") && spy.asked.count == 1, "согласие без выбранных заметок не отправляет")
+    }
+}
+
 print("\nПроверок: \(checks), ошибок: \(failures)")
 exit(failures == 0 ? 0 : 1)

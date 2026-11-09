@@ -167,7 +167,7 @@ struct TaskBreakdownView: View {
                 if completion {
                     Button {
                         draft.toggleStep(id: step.id, in: list)
-                    } label: { Image(systemName: step.isCompleted ? "checkmark.circle.fill" : "circle") }
+                    } label: { Image(systemName: step.isCompleted ? "checkmark.circle.fill" : "circle").compactHitArea() }
                         .buttonStyle(.plain).disabled(locked)
                         .accessibilityLabel(step.isCompleted ? "Вернуть шаг в работу" : "Отметить шаг выполненным")
                 }
@@ -179,14 +179,15 @@ struct TaskBreakdownView: View {
                         .lineLimit(1...5).textFieldStyle(.roundedBorder)
                         .strikethrough(step.isCompleted).disabled(locked)
                 }
-                VStack(spacing: 4) {
-                    Button { draft.moveStep(id: step.id, in: list, offset: -1) } label: { Image(systemName: "arrow.up") }
+                // Области 28×28 стоят вплотную без перекрытия; клик между строками не попадает в кнопку.
+                VStack(spacing: 0) {
+                    Button { draft.moveStep(id: step.id, in: list, offset: -1) } label: { Image(systemName: "arrow.up").compactHitArea() }
                         .disabled(locked || index == 0).accessibilityLabel("Переместить шаг выше")
-                    Button { draft.moveStep(id: step.id, in: list, offset: 1) } label: { Image(systemName: "arrow.down") }
+                    Button { draft.moveStep(id: step.id, in: list, offset: 1) } label: { Image(systemName: "arrow.down").compactHitArea() }
                         .disabled(locked || index == draft.steps(in: list).count - 1).accessibilityLabel("Переместить шаг ниже")
-                }
-                Button(role: .destructive) { draft.removeStep(id: step.id, in: list) } label: { Image(systemName: "trash") }
-                    .disabled(locked).accessibilityLabel("Удалить шаг")
+                }.buttonStyle(.borderless)
+                Button(role: .destructive) { draft.removeStep(id: step.id, in: list) } label: { Image(systemName: "trash").compactHitArea() }
+                    .buttonStyle(.borderless).disabled(locked).accessibilityLabel("Удалить шаг")
             }
         }
     }
