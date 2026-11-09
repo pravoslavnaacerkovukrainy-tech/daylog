@@ -32,6 +32,9 @@ private struct TaskSheet: Identifiable {
     var area: TaskArea
     var status: TaskStatus
     var plannedDay: Date?
+    /// Строка места хаоса: уходит из корзины только вместе с успешным сохранением задачи.
+    var chaosItem: ChaosItem?
+    var atRisk: Bool = false
 }
 
 private struct ProjectSheet: Identifiable {
@@ -47,9 +50,11 @@ struct OrganizerView: View {
     @State private var query = ""
     @State private var taskSheet: TaskSheet?
     @State private var projectSheet: ProjectSheet?
+    @State private var removingTask: DayPlan?
     @State private var selectedProjectID: UUID?
     @State private var showCompleted = false
     @State private var showArchived = false
+    @State private var showRemoved = false
     @State private var breakdownTask: DayPlan?
     @State private var completing: DayPlan?
     @State private var deleting: DayPlan?
@@ -58,40 +63,49 @@ struct OrganizerView: View {
     @State private var now = Date()
 
     private var current: OrganizerSection { section ?? .today }
-    private var today: String { DiaryDay.key(now) }
+    private var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var visibleProjects: [DiaryProject] {
         state.projects.filter { scope.includes($0.area) && ($0.archived == showArchived) }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
-    private var matchingProjects: [DiaryProject] {
-        visibleProjects.filter { query.isEmpty || ($0.title + " " + $0.outcome).localizedCaseInsensitiveContains(query) }
-    }
     private var selectedProject: DiaryProject? { state.projects.first { $0.id == selectedProjectID } }
     private var matchingTasks: [DayPlan] {
-        state.plans.filter { task in
-            scope.includes(task.taskArea) && matchesQuery(task)
+        _ = state.plans
+        return sectionTasks.filter { scope.includes($0.taskArea) }
+    }
+    /// Задачи текущего раздела. «Обзор» строится из групп пересмотра, а не из этого списка.
+    private var sectionTasks: [DayPlan] {
+        switch current {
+        case .inbox: return state.store.openTasks.filter { $0.taskStatus == .inbox }
+        case .waiting: return state.store.waitingTasks()
+        case .today: return state.store.tasksForToday(now: now)
+        case .review: return []
+        case .projects, .all:
+            return state.store.visibleTasks(showCompleted: showCompleted, showRemoved: showRemoved)
+                .filter { current == .all || $0.projectID == selectedProjectID }
         }
     }
-    private var tasks: [DayPlan] {
-        matchingTasks.filter { task in
-            switch current {
-            case .inbox: return !task.isCompleted && task.taskStatus == .inbox
-            case .waiting: return !task.isCompleted && task.taskStatus == .waiting
-            case .review:
-                return !task.isCompleted && isReviewDue(task.organization?.reviewDate)
-            case .today:
-                let scheduled = !task.day.isEmpty && task.day <= today
-                let due = task.organization?.deadline.map { Calendar.current.startOfDay(for: $0) <= Calendar.current.startOfDay(for: now) } ?? false
-                return !task.isCompleted && task.taskStatus != .paused && (scheduled || due)
-            case .projects: return task.projectID == selectedProjectID && (showCompleted || !task.isCompleted)
-            case .all: return showCompleted || !task.isCompleted
-            }
-        }.sorted(by: taskOrder)
+    private var tasks: [DayPlan] { matchingTasks.sorted(by: taskOrder) }
+    /// Один поиск по делам: задачи, проекты и строки места хаоса вместе.
+    private var found: OrganizerSearchResults {
+        _ = state.plans; _ = state.projects; _ = state.chaos
+        let results = state.store.searchOrganizer(query, includeCompleted: showCompleted, includeRemoved: showRemoved)
+        return OrganizerSearchResults(tasks: results.tasks.filter { scope.includes($0.taskArea) },
+                                      projects: results.projects.filter { scope.includes($0.area) },
+                                      chaos: results.chaos)
     }
-    private var reviewProjects: [DiaryProject] {
-        state.projects.filter { project in
-            scope.includes(project.area) && !project.archived && (project.nextActionID == nil || isReviewDue(project.reviewDate))
-        }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    /// Порядок пересмотра задаёт хранилище; здесь остаётся только фильтр по сфере.
+    private var reviewGroups: [ReviewGroup] {
+        _ = state.plans; _ = state.projects
+        return state.store.reviewGroups(now: now).compactMap { group in
+            let items = group.items.filter { item in
+                switch item {
+                case .task(let task): return scope.includes(task.taskArea)
+                case .project(let project): return scope.includes(project.area)
+                }
+            }
+            return items.isEmpty ? nil : ReviewGroup(title: group.title, items: items)
+        }
     }
 
     var body: some View {
@@ -127,7 +141,11 @@ struct OrganizerView: View {
         }
         .sheet(item: $taskSheet) { sheet in
             OrganizerTaskEditor(state: state, task: sheet.task, projectID: sheet.projectID,
-                                area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay)
+                                area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay,
+                                chaosItem: sheet.chaosItem, atRisk: sheet.atRisk)
+        }
+        .sheet(item: $removingTask) { task in
+            OrganizerTaskRemoval(state: state, task: task)
         }
         .sheet(item: $breakdownTask) { task in
             TaskBreakdownView(state: state, draft: state.breakdownDraft(for: task))
@@ -162,15 +180,16 @@ struct OrganizerView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text(current.rawValue).font(.title2.weight(.semibold))
+                Text(isSearching ? "Поиск" : current.rawValue).font(.title2.weight(.semibold))
                 Spacer()
                 Picker("Сфера", selection: $scope) {
                     ForEach(OrganizerArea.allCases) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden().frame(width: 225)
             }
             HStack {
-                TextField(current == .projects ? "Найти проект" : "Найти задачу", text: $query)
+                TextField("Найти задачу, проект или строку", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Поиск по делам")
                 if current == .projects {
                     Button { projectSheet = ProjectSheet(area: scope.defaultArea) } label: {
                         Label("Новый проект", systemImage: "folder.badge.plus")
@@ -184,11 +203,52 @@ struct OrganizerView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if current == .projects {
+        if isSearching {
+            searchResults
+        } else if current == .projects {
             if let project = selectedProject { projectDetail(project) } else { projectList }
         } else {
             taskList
         }
+    }
+
+    /// Один запрос ищет задачи, проекты и строки места хаоса вместе и показывает их группами.
+    private var searchResults: some View {
+        let results = found
+        return VStack(spacing: 0) {
+            visibilityToggles
+            List {
+                if !results.projects.isEmpty {
+                    Section("Проекты") { ForEach(results.projects) { projectRow($0) } }
+                }
+                if !results.tasks.isEmpty {
+                    Section("Задачи") { ForEach(results.tasks) { taskRow($0) } }
+                }
+                if !results.chaos.isEmpty {
+                    Section("Место хаоса") { ForEach(results.chaos) { chaosRow($0) } }
+                }
+            }.listStyle(.inset)
+                .overlay {
+                    if results.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "magnifyingglass").font(.system(size: 30)).foregroundStyle(.secondary)
+                            Text("Ничего не найдено").font(.headline)
+                            Text("Поиск охватывает открытые задачи, неархивные проекты и строки места хаоса. Выполненные и снятые задачи видны только с включёнными переключателями выше.")
+                                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                                .frame(maxWidth: 380)
+                        }.padding(24)
+                    }
+                }
+        }
+    }
+
+    /// Показ выполненных и снятых — явное решение человека.
+    private var visibilityToggles: some View {
+        HStack(spacing: 16) {
+            Toggle("Показывать выполненные", isOn: $showCompleted).toggleStyle(QuietCheckboxStyle())
+            Toggle("Показывать снятые", isOn: $showRemoved).toggleStyle(QuietCheckboxStyle())
+            Spacer()
+        }.padding(.horizontal, 20).padding(.vertical, 10)
     }
 
     private var taskList: some View {
@@ -207,68 +267,70 @@ struct OrganizerView: View {
                     ForEach(urgentChaos) { chaosRow($0) }
                 }.padding(.horizontal, 20).padding(.vertical, 12)
             }
-            if current == .all {
-                Toggle("Показывать выполненные", isOn: $showCompleted)
-                    .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 20).padding(.vertical, 10)
-            }
+            if current == .all { visibilityToggles }
             List {
                 if current == .inbox {
-                    ForEach(visibleChaos) { chaosRow($0) }
+                    ForEach(sortedChaos) { chaosRow($0) }
                 }
-                if current == .review, !reviewProjects.isEmpty {
-                    Section("Проекты для пересмотра") {
-                        ForEach(reviewProjects) { project in
-                            Button {
-                                section = .projects
-                                selectedProjectID = project.id
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(project.title).foregroundStyle(.primary)
-                                    Text(project.nextActionID == nil ? "Определите следующий шаг" : "Наступила дата пересмотра")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5).contentShape(Rectangle())
-                            }.buttonStyle(.plain)
+                if current == .review {
+                    ForEach(reviewGroups) { group in
+                        Section(group.title) {
+                            ForEach(group.items) { item in
+                                switch item {
+                                case .task(let task): taskRow(task)
+                                case .project(let project): reviewProjectRow(project)
+                                }
+                            }
                         }
                     }
+                } else if !tasks.isEmpty {
+                    Section("Задачи") { ForEach(tasks) { taskRow($0) } }
                 }
-                if !tasks.isEmpty {
-                    Section(current == .review ? "Задачи для пересмотра" : "Задачи") {
-                        ForEach(tasks) { taskRow($0) }
-                    }
-                }
-                if current == .today {
-                    let suggestions = matchingTasks.filter { !$0.isCompleted && $0.day.isEmpty && $0.taskStatus == .ready }.sorted(by: taskOrder)
-                    if !suggestions.isEmpty {
-                        Section("Можно выбрать на сегодня") {
-                            ForEach(Array(suggestions.prefix(5))) { task in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(task.text)
-                                        Text(task.taskArea.title).font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Button("На сегодня") { scheduleToday(task) }.disabled(state.isBlocked)
-                                }.padding(.vertical, 5).accessibilityElement(children: .contain)
-                            }
+                if current == .today, !suggestions.isEmpty {
+                    Section("Можно выбрать на сегодня") {
+                        ForEach(Array(suggestions.prefix(5))) { task in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(task.text)
+                                    Text(task.taskArea.title).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("На сегодня") { scheduleToday(task) }.disabled(state.isBlocked)
+                            }.padding(.vertical, 5).accessibilityElement(children: .contain)
                         }
                     }
                 }
             }.listStyle(.inset)
                 .overlay {
-                    if tasks.isEmpty && visibleChaos.isEmpty && current != .today && (current != .review || reviewProjects.isEmpty) {
-                        emptyState
-                    }
-                    if current == .today && tasks.isEmpty && urgentChaos.isEmpty && !matchingTasks.contains(where: { !$0.isCompleted && $0.day.isEmpty && $0.taskStatus == .ready }) {
+                    if current == .today {
+                        if tasks.isEmpty && urgentChaos.isEmpty && suggestions.isEmpty { emptyState }
+                    } else if current == .review {
+                        if reviewGroups.isEmpty { emptyState }
+                    } else if tasks.isEmpty && sortedChaos.isEmpty {
                         emptyState
                     }
                 }
         }
     }
 
+    /// Проект в списке пересмотра: открывает его карточку.
+    private func reviewProjectRow(_ project: DiaryProject) -> some View {
+        Button {
+            section = .projects
+            selectedProjectID = project.id
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(project.title).foregroundStyle(.primary)
+                Text(project.nextActionID == nil ? "Определите следующий шаг" : "Наступила дата пересмотра")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
     private var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: current.icon).font(.system(size: 30)).foregroundStyle(.secondary)
-            Text(query.isEmpty ? emptyTitle : "Задачи не найдены").font(.headline)
+            Text(emptyTitle).font(.headline)
             Text(emptyDetail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
             if current == .today {
@@ -290,9 +352,16 @@ struct OrganizerView: View {
         switch current {
         case .inbox: return "Одна строка. Задачей, заметкой или снятием она станет позже, когда вы сами это решите."
         case .waiting: return "Укажите в задаче, чей ответ или какое событие нужно, и когда к ней вернуться."
-        case .review: return "Здесь появятся задачи с наступившей датой пересмотра и проекты без следующего шага."
+        case .review: return "Список строится по порядку: обещания со сроком, обещания без срока, дела под угрозой, сегодняшние дела и следующие шаги проектов, ожидания, затем наступившие даты пересмотра и проекты без следующего шага."
         default: return "Добавьте задачу или запланируйте действие из общего списка."
         }
+    }
+
+    /// Что можно выбрать на сегодня: открытые дела без назначенного дня.
+    private var suggestions: [DayPlan] {
+        _ = state.plans
+        return state.store.openTasks.filter { $0.day.isEmpty && $0.taskStatus == .ready && scope.includes($0.taskArea) }
+            .sorted(by: taskOrder)
     }
 
     private func taskRow(_ task: DayPlan) -> some View {
@@ -300,16 +369,16 @@ struct OrganizerView: View {
             Button {
                 if task.isCompleted { reopening = task } else if !task.taskSteps.isEmpty { completing = task } else { state.completePlan(task) }
             } label: {
-                Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
+                Image(systemName: task.isCompleted ? "checkmark.circle.fill" : (task.isRemoved ? "xmark.circle" : "circle"))
                     .font(.system(size: 20)).foregroundStyle(task.isCompleted ? Color.accentColor : Color.secondary)
-            }.buttonStyle(.plain).padding(.top, 2).disabled(state.isBlocked)
+            }.buttonStyle(.plain).padding(.top, 2).disabled(state.isBlocked || task.isRemoved)
                 .accessibilityLabel(task.isCompleted ? "Вернуть задачу: \(task.text)" : "Выполнить задачу: \(task.text)")
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(task.text).strikethrough(task.isCompleted).foregroundStyle(task.isCompleted ? .secondary : .primary)
-                        .onTapGesture { if !task.isCompleted { edit(task) } }
+                    Text(task.text).strikethrough(task.isCompleted).foregroundStyle(task.isCompleted || task.isRemoved ? .secondary : .primary)
+                        .onTapGesture { if task.isOpen { edit(task) } }
                     Spacer(minLength: 8)
-                    if !task.isCompleted {
+                    if task.isOpen {
                         Button { edit(task) } label: { Image(systemName: "ellipsis") }
                             .buttonStyle(.borderless).accessibilityLabel("Изменить задачу: \(task.text)")
                     }
@@ -321,6 +390,17 @@ struct OrganizerView: View {
                     }
                     if task.taskStatus != .ready && !task.isCompleted { Text(task.taskStatus.title) }
                 }.font(.caption).foregroundStyle(.secondary)
+                if task.isOpen, let promised = task.promisedTo {
+                    Label("Кому обещано · \(promised)", systemImage: "person.2").font(.callout).foregroundStyle(.secondary)
+                }
+                if task.isOpen, task.isAtRisk {
+                    Label("Обещание под угрозой", systemImage: "exclamationmark.triangle")
+                        .font(.callout).foregroundStyle(Color.accentColor)
+                }
+                if let reason = task.removalReason {
+                    Label("Причина снятия · \(reason)", systemImage: "xmark.circle")
+                        .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 if task.taskStatus == .waiting, let who = task.organization?.waitingFor, !task.isCompleted {
                     Label(who, systemImage: "hourglass").font(.callout).foregroundStyle(.secondary)
                 }
@@ -348,12 +428,25 @@ struct OrganizerView: View {
         }.padding(.vertical, 9).accessibilityElement(children: .contain)
             .contextMenu {
                 Button(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги") { breakdownTask = task }
-                if !task.isCompleted {
+                if task.isOpen {
                     Button("Изменить") { edit(task) }
                     Button("Запланировать на сегодня") { scheduleToday(task) }
+                    Button(task.isAtRisk ? "Снять отметку «Обещание под угрозой»" : "Обещание под угрозой") {
+                        state.changeOrganizer(task.isAtRisk ? "Отметка снята" : "Отмечено: обещание под угрозой") {
+                            _ = try state.store.setTaskAtRisk(id: task.id, !task.isAtRisk)
+                        }
+                    }
                     if let projectID = task.projectID, task.taskStatus == .ready {
                         Button("Сделать следующим шагом") {
                             state.changeOrganizer("Следующий шаг выбран") { try state.store.setNextAction(projectID: projectID, taskID: task.id) }
+                        }
+                    }
+                    Button("Снять…", role: .destructive) { removingTask = task }
+                }
+                if task.isRemoved {
+                    Button("Вернуть в работу") {
+                        state.changeOrganizer("Задача возвращена в работу") {
+                            _ = try state.store.returnTaskToWork(id: task.id)
                         }
                     }
                 }
@@ -364,40 +457,45 @@ struct OrganizerView: View {
             }
     }
 
+    private func projectRow(_ project: DiaryProject) -> some View {
+        Button {
+            section = .projects
+            selectedProjectID = project.id
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Image(systemName: "folder").foregroundStyle(Color.accentColor)
+                    Text(project.title).font(.headline)
+                    Spacer()
+                    Text(project.area.title).font(.caption).foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                }
+                Text(project.outcome).foregroundStyle(.secondary)
+                if let next = state.plans.first(where: { $0.id == project.nextActionID }) {
+                    Label(next.text, systemImage: "arrow.right.circle").font(.callout)
+                } else if !project.archived {
+                    Text("Определите следующий шаг").font(.callout).foregroundStyle(Color.accentColor)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
     private var projectList: some View {
         VStack(alignment: .leading, spacing: 0) {
             Toggle("Показывать завершённые проекты", isOn: $showArchived)
                 .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 20).padding(.vertical, 12)
             List {
-                ForEach(matchingProjects) { project in
-                    Button { selectedProjectID = project.id } label: {
-                        VStack(alignment: .leading, spacing: 7) {
-                            HStack {
-                                Image(systemName: "folder").foregroundStyle(Color.accentColor)
-                                Text(project.title).font(.headline)
-                                Spacer()
-                                Text(project.area.title).font(.caption).foregroundStyle(.secondary)
-                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                            }
-                            Text(project.outcome).foregroundStyle(.secondary)
-                            if let next = state.plans.first(where: { $0.id == project.nextActionID }) {
-                                Label(next.text, systemImage: "arrow.right.circle").font(.callout)
-                            } else if !project.archived {
-                                Text("Определите следующий шаг").font(.callout).foregroundStyle(Color.accentColor)
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10).contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                }
+                ForEach(visibleProjects) { projectRow($0) }
             }.listStyle(.inset)
                 .overlay {
-                    if matchingProjects.isEmpty, state.projects.isEmpty {
+                    if visibleProjects.isEmpty, state.projects.isEmpty {
                         VStack(spacing: 12) {
                             Image(systemName: "folder").font(.largeTitle).foregroundStyle(.secondary)
                             Text("Какой результат хотите получить?").font(.headline)
                             Text("Создайте проект и выберите одно ближайшее действие.").foregroundStyle(.secondary)
                             Button("Создать проект") { projectSheet = ProjectSheet(area: scope.defaultArea) }.disabled(state.isBlocked)
                         }.padding()
-                    } else if matchingProjects.isEmpty {
+                    } else if visibleProjects.isEmpty {
                         Text("Проекты не найдены")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -455,8 +553,9 @@ struct OrganizerView: View {
                         }.disabled(state.isBlocked)
                     }.padding(12).background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                 }
-                HStack {
+                HStack(spacing: 16) {
                     Toggle("Выполненные", isOn: $showCompleted).toggleStyle(QuietCheckboxStyle())
+                    Toggle("Снятые", isOn: $showRemoved).toggleStyle(QuietCheckboxStyle())
                     Spacer()
                     Button { newTask(project: project) } label: { Label("Добавить действие", systemImage: "plus") }
                         .disabled(project.archived || state.isBlocked)
@@ -468,18 +567,11 @@ struct OrganizerView: View {
     }
 
     private var sortedChaos: [ChaosItem] {
-        state.chaos.sorted { a, b in
-            if a.urgent != b.urgent { return a.urgent && !b.urgent }
-            if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
-            return a.id.uuidString < b.id.uuidString
-        }
+        _ = state.chaos
+        return state.store.sortedChaos()
     }
 
     private var urgentChaos: [ChaosItem] { sortedChaos.filter(\.urgent) }
-
-    private var visibleChaos: [ChaosItem] {
-        sortedChaos.filter { query.isEmpty || $0.text.localizedCaseInsensitiveContains(query) }
-    }
 
     private func chaosRow(_ item: ChaosItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -511,10 +603,10 @@ struct OrganizerView: View {
         .padding(.vertical, 4)
     }
 
+    /// «Это задача» открывает обычный редактор: остальные поля человек заполняет по желанию,
+    /// а строка уходит из корзины только вместе с успешно сохранённой задачей.
     private func decideTask(_ item: ChaosItem, area: TaskArea) {
-        state.changeOrganizer("Запись стала задачей") {
-            _ = try state.store.makeTask(fromChaos: item.id, area: area)
-        }
+        taskSheet = TaskSheet(area: area, status: .ready, chaosItem: item, atRisk: item.urgent)
     }
 
     private func newTask(project: DiaryProject? = nil) {
@@ -544,15 +636,13 @@ struct OrganizerView: View {
             _ = try state.store.updateTask(id: task.id, text: task.text, plannedDay: Date(), organization: metadata)
         }
     }
-    private func matchesQuery(_ task: DayPlan) -> Bool {
-        query.isEmpty || (task.text + " " + (task.organization?.details ?? "") + " " + (task.organization?.waitingFor ?? "")).localizedCaseInsensitiveContains(query)
-    }
     private func isReviewDue(_ date: Date?) -> Bool {
         guard let date else { return false }
         return Calendar.current.startOfDay(for: date) <= Calendar.current.startOfDay(for: now)
     }
+    /// Открытые дела выше закрытых: снятая задача уходит вниз вместе с выполненной.
     private func taskOrder(_ first: DayPlan, _ second: DayPlan) -> Bool {
-        if first.isCompleted != second.isCompleted { return !first.isCompleted }
+        if first.isOpen != second.isOpen { return first.isOpen }
         if first.createdAt != second.createdAt { return first.createdAt < second.createdAt }
         return first.id.uuidString < second.id.uuidString
     }
@@ -562,11 +652,15 @@ private struct OrganizerTaskEditor: View {
     @ObservedObject var state: AppState
     @Environment(\.dismiss) private var dismiss
     let task: DayPlan?
+    /// Строка места хаоса, если редактор открыт решением «Это задача».
+    let chaosItem: ChaosItem?
     @State private var text: String
     @State private var area: TaskArea
     @State private var projectID: UUID?
     @State private var status: TaskStatus
     @State private var waitingFor: String
+    @State private var promisedTo: String
+    @State private var atRisk: Bool
     @State private var details: String
     @State private var planned: Bool
     @State private var day: Date
@@ -577,16 +671,20 @@ private struct OrganizerTaskEditor: View {
     @State private var saveError: String?
     @State private var showSteps = false
 
-    init(state: AppState, task: DayPlan?, projectID: UUID?, area: TaskArea, status: TaskStatus, plannedDay: Date?) {
+    init(state: AppState, task: DayPlan?, projectID: UUID?, area: TaskArea, status: TaskStatus,
+         plannedDay: Date?, chaosItem: ChaosItem? = nil, atRisk: Bool = false) {
         self.state = state
         self.task = task
+        self.chaosItem = chaosItem
         let metadata = task?.organization
         let date = task.flatMap { DiaryDay.date($0.day) } ?? plannedDay
-        _text = State(initialValue: task?.text ?? "")
+        _text = State(initialValue: task?.text ?? (chaosItem?.text ?? ""))
         _area = State(initialValue: metadata?.area ?? area)
         _projectID = State(initialValue: task?.projectID ?? projectID)
         _status = State(initialValue: task?.taskStatus ?? status)
         _waitingFor = State(initialValue: metadata?.waitingFor ?? "")
+        _promisedTo = State(initialValue: metadata?.promisedTo ?? "")
+        _atRisk = State(initialValue: metadata?.atRisk ?? atRisk)
         _details = State(initialValue: metadata?.details ?? "")
         _planned = State(initialValue: date != nil)
         _day = State(initialValue: date ?? Date())
@@ -602,14 +700,25 @@ private struct OrganizerTaskEditor: View {
             Form {
                 Section {
                     TextField("Действие", text: $text, axis: .vertical).lineLimit(1...4)
+                    if chaosItem != nil {
+                        Text("Строка уйдёт из места хаоса, когда вы сохраните задачу. Отмена и ошибка оставят её на месте.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Picker("Сфера", selection: $area) { ForEach(TaskArea.allCases) { Text($0.title).tag($0) } }
                         .disabled(projectID != nil)
                     Picker("Проект", selection: $projectID) {
                         Text("Без проекта").tag(nil as UUID?)
                         ForEach(state.projects.filter { !$0.archived }) { Text("\($0.title) · \($0.area.title)").tag(Optional($0.id)) }
                     }
-                    Picker("Состояние", selection: $status) { ForEach(TaskStatus.allCases) { Text($0.title).tag($0) } }
+                    Picker("Состояние", selection: $status) { ForEach(TaskStatus.selectableCases) { Text($0.title).tag($0) } }
                     if status == .waiting { TextField("Чего или чьего ответа жду", text: $waitingFor, axis: .vertical).lineLimit(1...3) }
+                }
+                Section("Обещание другому человеку") {
+                    TextField("Кому обещано", text: $promisedTo)
+                        .accessibilityLabel("Кому обещано")
+                    Toggle("Обещание под угрозой", isOn: $atRisk).toggleStyle(QuietCheckboxStyle())
+                    Text("Отметка не меняет статус и даты, не отправляет уведомлений и не меняет порядок остальных дел. Она показывает дело в «Сегодня» и в пересмотре, даже если день работы не выбран.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Когда вернуться к задаче") {
                     OrganizerDateField(title: "День работы", enabled: $planned, date: $day)
@@ -662,15 +771,60 @@ private struct OrganizerTaskEditor: View {
 
     private func save() {
         let metadata = TaskOrganization(area: area, projectID: projectID, status: status, waitingFor: waitingFor,
-                                        reviewDate: hasReview ? review : nil, deadline: hasDeadline ? deadline : nil, details: details)
+                                        promisedTo: promisedTo, atRisk: atRisk,
+                                        reviewDate: hasReview ? review : nil, deadline: hasDeadline ? deadline : nil,
+                                        details: details)
         let success = state.changeOrganizer(task == nil ? "Задача добавлена" : "Задача сохранена") {
             if let task {
                 _ = try state.store.updateTask(id: task.id, text: text, plannedDay: planned ? day : nil, organization: metadata)
+            } else if let chaosItem {
+                _ = try state.store.makeTask(fromChaos: chaosItem.id, text: text,
+                                             plannedDay: planned ? day : nil, organization: metadata)
             } else {
                 _ = try state.store.addTask(text: text, plannedDay: planned ? day : nil, organization: metadata)
             }
         }
         if success { dismiss() } else { saveError = state.errorMessage }
+    }
+}
+
+/// «Снять…»: причина обязательна и сохраняется вместе с задачей.
+private struct OrganizerTaskRemoval: View {
+    @ObservedObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    let task: DayPlan
+    @State private var reason = ""
+    @State private var saveError: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack { Text("Снять задачу").font(.title2.weight(.semibold)); Spacer() }.padding(20)
+            Form {
+                Section("Что снимаете") {
+                    Text(task.text).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Section("Причина") {
+                    TextField("Почему дело больше не нужно", text: $reason, axis: .vertical)
+                        .lineLimit(2...4).accessibilityLabel("Причина снятия")
+                    Text("Без причины снятие не сохраняется. Снятие не считается выполнением, не создаёт запись в дневнике и сохраняет шаги задачи.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.formStyle(.grouped)
+            if let error = saveError { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled).padding(.horizontal, 20) }
+            HStack {
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Снять", role: .destructive, action: save).keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
+            }.padding(20)
+        }.frame(width: 480, height: 340)
+    }
+
+    private func save() {
+        if state.changeOrganizer("Задача снята", { _ = try state.store.setTaskRemoved(id: task.id, reason: reason) }) {
+            dismiss()
+        } else { saveError = state.errorMessage }
     }
 }
 

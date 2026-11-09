@@ -533,10 +533,26 @@ test("Документ: v2-файл читается как notes=[]") {
     let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
     check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
 }
-test("Документ: будущая версия 7 отвергается как неподдерживаемая") {
-    let future = #"{"format":"daylog","version":7,"entries":[],"notes":[]}"#.data(using: .utf8)!
-    let err = expectError("v7 не поддерживается") { _ = try DiaryJSON.decode(future) }
-    check((err as? DiaryError) == .unsupportedFormat("версия 7, приложение понимает версию до 6"), "сообщение про версию: \(String(describing: err))")
+test("Документ: будущая версия 8 отвергается как неподдерживаемая") {
+    let future = #"{"format":"daylog","version":8,"entries":[],"notes":[]}"#.data(using: .utf8)!
+    let err = expectError("v8 не поддерживается") { _ = try DiaryJSON.decode(future) }
+    check((err as? DiaryError) == .unsupportedFormat("версия 8, приложение понимает версию до 7"), "сообщение про версию: \(String(describing: err))")
+}
+
+test("Документ: версия 7 только при новых полях пересмотра") {
+    let plain = DayPlan(text: "Обычная", day: "", createdAt: day1, updatedAt: day1)
+    check(DiaryDocument(entries: [], plans: [plain]).version == 4, "блок полей без данных версию не поднимает")
+    var promised = plain; promised.organization = TaskOrganization(promisedTo: "Коллега")
+    check(DiaryDocument(entries: [], plans: [promised]).version == 7, "непустое «Кому обещано» даёт v7")
+    var atRisk = plain; atRisk.organization = TaskOrganization(atRisk: true)
+    check(DiaryDocument(entries: [], plans: [atRisk]).version == 7, "отметка угрозы даёт v7")
+    var removed = plain; removed.organization = TaskOrganization(status: .removed, removalReason: "Уже не нужно")
+    check(DiaryDocument(entries: [], plans: [removed]).version == 7, "снятие с причиной даёт v7")
+    var emptyPromise = plain; emptyPromise.organization = TaskOrganization(promisedTo: "   ")
+    check(DiaryDocument(entries: [], plans: [emptyPromise]).version == 4, "пробелы в адресате версию не поднимают")
+    let chaos = ChaosItem(text: "Строка", createdAt: day1)
+    check(DiaryDocument(entries: [], plans: [plain], chaos: [chaos]).version == 6, "место хаоса по-прежнему даёт v6")
+    check(DiaryDocument(entries: [], plans: [promised], chaos: [chaos]).version == 7, "поля пересмотра сильнее корзины")
 }
 
 // MARK: Заметки — хранилище
@@ -1257,8 +1273,9 @@ test("Место хаоса: запись не становится задаче
     let removed = try store.deleteChaosItem(id: plain.id)
     try store.restoreChaosItem(removed)
     check(store.chaos.contains(where: { $0.id == plain.id }), "снятую запись можно вернуть")
-    let task = try store.makeTask(fromChaos: urgent.id, area: .work)
+    let task = try store.makeTask(fromChaos: urgent.id, text: urgent.text, organization: TaskOrganization(area: .work))
     check(task.taskArea == .work && task.taskStatus == .ready && task.day.isEmpty, "задача выходит без дня и без срока")
+    check(task.isAtRisk && task.organization?.deadline == nil && task.organization?.reviewDate == nil, "срочная строка даёт отметку угрозы и не выдумывает даты")
     check(!store.chaos.contains(where: { $0.id == urgent.id }) && store.entries.isEmpty, "задача покидает корзину и не пишет дневник")
     let note = try store.makeNote(fromChaos: plain.id)
     check(note.title == "Идея без места" && note.body == "Идея без места" && store.chaos.isEmpty && store.entries.isEmpty, "заметка забирает запись и не пишет дневник")
@@ -1285,6 +1302,270 @@ test("Хранилище: два экземпляра не перезаписы�
     _ = try second.addTask(text: "Второй", organization: TaskOrganization())
     let reloaded = DiaryStore(directory: dir); try reloaded.load()
     check(reloaded.plans.count == 2, "после загрузки свежей версии обе задачи сохранены")
+}
+
+// MARK: Поля пересмотра: обещание, угроза, снятие, поиск и порядок
+
+func reviewTaskIDs(_ groups: [ReviewGroup]) -> [UUID] {
+    groups.flatMap(\.items).compactMap { item in
+        if case .task(let task) = item { return task.id }
+        return nil
+    }
+}
+
+func reviewProjectIDs(_ groups: [ReviewGroup]) -> [UUID] {
+    groups.flatMap(\.items).compactMap { item in
+        if case .project(let project) = item { return project.id }
+        return nil
+    }
+}
+
+test("Обещание: «Кому обещано» хранится, ищется и не уходит в дневник и ИИ") {
+    let dir = freshDir("promised-to")
+    let store = DiaryStore(directory: dir); try store.load()
+    let task = try store.addTask(text: "Отправить черновик",
+                                 organization: TaskOrganization(area: .work, promisedTo: "  Редактор  ", details: "Только шаблон A"))
+    check(task.promisedTo == "Редактор", "пробелы по краям адресата снимаются")
+    check(try DiaryJSON.decode(Data(contentsOf: store.fileURL)).version == 7, "непустой адресат поднимает файл до v7")
+    let cleared = try store.updateTask(id: task.id, text: task.text, plannedDay: nil,
+                                       organization: TaskOrganization(area: .work, promisedTo: "   "))
+    check(cleared.promisedTo == nil, "пустая строка хранится как отсутствие поля")
+    _ = try store.updateTask(id: task.id, text: task.text, plannedDay: nil,
+                             organization: TaskOrganization(area: .work, promisedTo: "Редактор", details: "Только шаблон A"))
+    let reloaded = DiaryStore(directory: dir); try reloaded.load()
+    check(reloaded.plans.first?.promisedTo == "Редактор", "адресат переживает перезапуск")
+    check(reloaded.searchOrganizer("редактор").tasks.map(\.id) == [task.id], "поиск находит задачу по адресату")
+    let saved = reloaded.plans[0]
+    let request = try TaskBreakdown.requestBody(input: TaskBreakdownInput(title: saved.text,
+                                                                         details: saved.organization?.details ?? ""))
+    let messages = (try JSONSerialization.jsonObject(with: request) as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+    let sent = messages.compactMap { $0["content"] as? String }.joined(separator: "\n")
+    check(sent.contains("Только шаблон A") && !sent.contains("Редактор"), "адресат не отправляется во внешний сервис")
+    let markdown = try reloaded.exportMarkdown()
+    check(markdown.contains("Кому обещано") && markdown.contains("Редактор"), "Markdown показывает адресата")
+    let completed = try reloaded.completePlan(id: task.id, now: day2)
+    check(completed.entry.text == "Отправить черновик" && completed.entry.context == nil, "запись дневника не копирует адресата")
+    check(reloaded.entries.count == 1, "выполнение по-прежнему создаёт одну запись")
+}
+
+test("Пересмотр: дело под угрозой видно при любом статусе, отметку ставит человек") {
+    let dir = freshDir("at-risk")
+    let store = DiaryStore(directory: dir); try store.load()
+    let now = date(2030, 3, 15, 9, 0)
+    let paused = try store.addTask(text: "Отложено до весны", organization: TaskOrganization(status: .paused))
+    let waiting = try store.addTask(text: "Жду ответа", organization: TaskOrganization(status: .waiting, waitingFor: "Ответ коллеги"))
+    let plain = try store.addTask(text: "Обычное дело", organization: TaskOrganization())
+    check(store.tasksForToday(now: now).isEmpty && store.tasksAtRisk().isEmpty, "без отметки и без дня дел на сегодня нет")
+    let marked = try store.setTaskAtRisk(id: paused.id, true, now: now)
+    check(marked.isAtRisk && marked.taskStatus == .paused && marked.day.isEmpty, "отметка не меняет статус и даты")
+    check(marked.organization?.deadline == nil && marked.organization?.reviewDate == nil, "отметка не назначает даты")
+    check(store.tasksForToday(now: now).map(\.id) == [paused.id], "отложенное дело с отметкой видно в «Сегодня»")
+    check(store.tasksAtRisk().map(\.id) == [paused.id], "и в выборке угрозы")
+    check(reviewTaskIDs(store.reviewGroups(now: now)).contains(paused.id), "и в пересмотре")
+    _ = try store.setTaskAtRisk(id: waiting.id, true, now: now)
+    check(Set(store.tasksAtRisk().map(\.id)) == Set([paused.id, waiting.id]), "ожидающее дело с отметкой тоже видно")
+    check(store.entries.isEmpty, "отметка не пишет дневник")
+    _ = try store.setTaskAtRisk(id: paused.id, false, now: now)
+    check(store.tasksAtRisk().map(\.id) == [waiting.id], "человек снимает отметку тем же действием")
+    check(!store.tasksForToday(now: now).contains { $0.id == paused.id }, "снятая отметка убирает дело из «Сегодня»")
+    check(!reviewTaskIDs(store.reviewGroups(now: now)).contains(paused.id), "и из пересмотра")
+    _ = try store.completePlan(id: plain.id, now: now)
+    expectError("отметка на выполненной задаче отклоняется") { _ = try store.setTaskAtRisk(id: plain.id, true, now: now) }
+    check(!store.tasksAtRisk().contains { $0.id == plain.id }, "выполненная задача в выборку угрозы не входит")
+    check(!store.tasksForToday(now: now).contains { $0.id == plain.id }, "выполненная задача не возвращается в «Сегодня»")
+    let inbox = try store.addTask(text: "Строка в корзине", organization: TaskOrganization(status: .inbox))
+    _ = try store.setTaskAtRisk(id: inbox.id, true, now: now)
+    check(!store.tasksAtRisk().contains { $0.id == inbox.id }, "задача места хаоса остаётся в корзине, а не в выборке угрозы")
+}
+
+test("Снятие: причина обязательна, работа не считается выполненной") {
+    let dir = freshDir("removed-task")
+    let store = DiaryStore(directory: dir); try store.load()
+    let now = date(2030, 3, 15, 9, 0)
+    let project = try store.saveProject(title: "Проект", outcome: "Результат", area: .work, uncertainty: "", reviewDate: nil)
+    var task = try store.addTask(text: "Подготовить материалы", plannedDay: day1,
+                                 organization: TaskOrganization(area: .work, projectID: project.id,
+                                                                promisedTo: "Коллега", atRisk: true,
+                                                                reviewDate: day1, deadline: day2))
+    task = try store.replaceTaskSteps(parent: task, steps: [TaskStep(text: "Первый шаг")])
+    try store.setNextAction(projectID: project.id, taskID: task.id)
+    let error = expectError("снятие без причины отклоняется") { _ = try store.setTaskRemoved(id: task.id, reason: "   ") }
+    check((error as? DiaryError) == .emptyRemovalReason, "причина обязательна")
+    check(store.plans.first { $0.id == task.id }?.isRemoved == false, "после отказа задача не снята")
+    let removed = try store.setTaskRemoved(id: task.id, reason: " Потребность отпала ", now: now)
+    check(removed.isRemoved && removed.completedAt == nil && removed.entryID == nil, "снятие не отмечается выполнением")
+    check(removed.removalReason == "Потребность отпала", "причина сохраняется с обрезанными краями")
+    check(store.entries.isEmpty, "снятие не создаёт запись дневника")
+    check(removed.taskSteps.map(\.text) == ["Первый шаг"], "шаги снятой задачи сохраняются")
+    check(store.tasksForToday(now: now).isEmpty && store.tasksAtRisk().isEmpty, "снятая задача вне «Сегодня» и выборки угрозы")
+    check(store.waitingTasks().isEmpty, "снятая задача вне ожидания")
+    check(reviewTaskIDs(store.reviewGroups(now: now)).isEmpty, "снятая задача вне пересмотра")
+    check(store.visibleTasks().isEmpty, "в полном списке снятая задача скрыта")
+    check(store.visibleTasks(showRemoved: true).map(\.id) == [task.id], "и видна только с явным переключателем")
+    check(store.projects.first?.nextActionID == nil, "следующий шаг проекта освобождается")
+    check(store.searchOrganizer("материалы").tasks.isEmpty, "обычный поиск снятую задачу не возвращает")
+    check(store.searchOrganizer("материалы", includeRemoved: true).tasks.map(\.id) == [task.id], "переключатель возвращает её")
+    let archive = try DiaryStore.parseExportDocument(store.exportJSON())
+    check(archive.plans.first?.removalReason == "Потребность отпала" && archive.plans.first?.taskStatus == .removed, "JSON хранит статус и причину")
+    let markdown = try store.exportMarkdown()
+    check(markdown.contains("Снято") && markdown.contains("Причина снятия") && markdown.contains("Потребность отпала"), "Markdown показывает снятие и причину")
+    try store.setProjectArchived(id: project.id, archived: true)
+    check(store.projects.first?.archived == true, "снятая задача считается закрытой и не держит проект")
+    expectError("снятую задачу нельзя изменить") {
+        _ = try store.updateTask(id: task.id, text: "Другое", plannedDay: nil, organization: TaskOrganization())
+    }
+    expectError("снятую задачу нельзя выполнить") { _ = try store.completePlan(id: task.id, now: now) }
+    let reloaded = DiaryStore(directory: dir); try reloaded.load()
+    check(reloaded.plans.first?.removalReason == "Потребность отпала", "причина переживает перезапуск")
+    let restored = try reloaded.returnTaskToWork(id: task.id, now: now)
+    check(restored.taskStatus == .ready && restored.removalReason == nil, "возврат восстанавливает «Можно делать» и стирает прежнюю причину")
+    check(restored.taskSteps.map(\.text) == ["Первый шаг"] && restored.promisedTo == "Коллега" && restored.isAtRisk, "остальные поля и шаги сохраняются")
+    expectError("возврат уже работающей задачи отклоняется") { _ = try reloaded.returnTaskToWork(id: task.id) }
+    check(try DiaryJSON.decode(Data(contentsOf: reloaded.fileURL)).version == 7, "отметка угрозы держит v7 и после возврата")
+}
+
+test("Миграция: v6 читается без перезаписи, первое сохранение v7 создаёт одну копию") {
+    let dir = freshDir("review-migration")
+    let legacy = DiaryDocument(entries: [],
+                               plans: [DayPlan(text: "Прежняя задача", day: "", createdAt: day1, updatedAt: day1)],
+                               chaos: [ChaosItem(text: "Прежняя строка", createdAt: day1)])
+    check(legacy.version == 6, "исходный документ — v6")
+    let original = try DiaryJSON.encoder().encode(legacy)
+    let file = dir.appendingPathComponent("entries.json")
+    try original.write(to: file)
+    let store = DiaryStore(directory: dir); try store.load()
+    check(try Data(contentsOf: file) == original, "загрузка не переписывает старый файл")
+    check(store.plans.count == 1 && store.plans[0].promisedTo == nil && !store.plans[0].isAtRisk, "прежние задачи читаются без новых полей")
+    check(store.chaos.map(\.text) == ["Прежняя строка"], "корзина читается")
+    check(store.plans.filter { $0.taskStatus == .inbox }.isEmpty, "старые задачи не переносятся в ChaosItem")
+    _ = try store.addChaosItem(text: "Новая строка")
+    check(try DiaryJSON.decode(Data(contentsOf: file)).version == 6, "пока новых полей нет, файл остаётся v6")
+    check(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("entries-before-review-") }.isEmpty, "копия пересмотра ещё не создавалась")
+    let beforeReview = try Data(contentsOf: file)
+    _ = try store.setTaskAtRisk(id: store.plans[0].id, true)
+    check(try DiaryJSON.decode(Data(contentsOf: file)).version == 7, "первое поле пересмотра поднимает файл до v7")
+    let backups = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        .filter { $0.lastPathComponent.hasPrefix("entries-before-review-") }
+    check(backups.count == 1, "создана одна копия до перехода")
+    check(try Data(contentsOf: backups[0]) == beforeReview, "копия побайтно соответствует файлу до перехода")
+    _ = try store.setTaskAtRisk(id: store.plans[0].id, false)
+    check(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("entries-before-review-") }.count == 1, "следующие сохранения не создают лишних копий")
+    let reloaded = DiaryStore(directory: dir); try reloaded.load()
+    check(reloaded.chaos.count == 2 && reloaded.plans.count == 1 && !reloaded.plans[0].isAtRisk, "после перезапуска данные целы")
+}
+
+test("Пересмотр: один запрос находит задачи, проекты и строки хаоса") {
+    let store = DiaryStore(directory: freshDir("organizer-search")); try store.load()
+    let project = try store.saveProject(title: "Ремонт кухни", outcome: "Готовая кухня", area: .personal,
+                                        uncertainty: "Нужно уточнить, что ответит поставщик", reviewDate: nil)
+    let archived = try store.saveProject(title: "Закрытый", outcome: "Поставщик сдан", area: .personal,
+                                         uncertainty: "", reviewDate: nil)
+    try store.setProjectArchived(id: archived.id, archived: true)
+    let promised = try store.addTask(text: "Позвонить", organization: TaskOrganization(promisedTo: "Поставщик"))
+    let waiting = try store.addTask(text: "Жду счёт", organization: TaskOrganization(status: .waiting, waitingFor: "Ответ поставщика"))
+    let detailed = try store.addTask(text: "Разобрать бумаги", organization: TaskOrganization(details: "Запрос поставщику отправлен"))
+    let plain = try store.addTask(text: "Полка на кухне", organization: TaskOrganization(projectID: project.id))
+    _ = try store.addChaosItem(text: "Спросить поставщика про гарантию")
+    let done = try store.addTask(text: "Оплачено поставщику", organization: TaskOrganization())
+    _ = try store.completePlan(id: done.id, now: day1)
+    let removed = try store.addTask(text: "Лишнее поставщику", organization: TaskOrganization())
+    _ = try store.setTaskRemoved(id: removed.id, reason: "Не нужно")
+
+    let found = store.searchOrganizer("ПОСТАВЩИК")
+    check(Set(found.tasks.map(\.id)) == Set([promised.id, waiting.id, detailed.id]), "регистр не важен, ищутся адресат, ожидание и подробности")
+    check(found.projects.map(\.id) == [project.id], "неархивный проект находится, архивный — нет")
+    check(found.chaos.map(\.text) == ["Спросить поставщика про гарантию"], "строка места хаоса находится")
+    check(!found.tasks.contains { $0.id == done.id || $0.id == removed.id }, "выполненные и снятые в обычную выдачу не входят")
+    check(store.searchOrganizer("   ").isEmpty, "пустой запрос ничего не возвращает")
+    check(store.searchOrganizer("поставщик", includeCompleted: true, includeRemoved: true).tasks.count == 5, "переключатели возвращают выполненные и снятые")
+    check(store.searchOrganizer("кухн").projects.map(\.id) == [project.id] && store.searchOrganizer("кухн").tasks.map(\.id) == [plain.id], "проект ищется и по названию, и по результату")
+}
+
+test("Пересмотр: порядок групп, первое совпадение побеждает, даты не выдумываются") {
+    let store = DiaryStore(directory: freshDir("review-order")); try store.load()
+    let now = date(2030, 3, 15, 9, 0)
+    let project = try store.saveProject(title: "Проект без шага", outcome: "Результат", area: .work, uncertainty: "", reviewDate: nil)
+    let dueReview = try store.addTask(text: "Пересмотреть отчёт", organization: TaskOrganization(reviewDate: date(2030, 3, 14, 0, 0)))
+    let waiting = try store.addTask(text: "Жду согласования",
+                                    organization: TaskOrganization(status: .waiting, waitingFor: "Ответ редактора",
+                                                                   reviewDate: date(2030, 3, 20, 0, 0)))
+    let today = try store.addTask(text: "Сегодняшнее дело", plannedDay: date(2030, 3, 15, 0, 0),
+                                  organization: TaskOrganization(projectID: project.id))
+    let atRisk = try store.addTask(text: "Отложено, но горит", organization: TaskOrganization(status: .paused, atRisk: true))
+    let promiseNoDate = try store.addTask(text: "Обещал помочь", organization: TaskOrganization(promisedTo: "Сосед"))
+    let promiseFar = try store.addTask(text: "Отчёт к концу месяца",
+                                       organization: TaskOrganization(promisedTo: "Руководитель", deadline: date(2030, 3, 28, 0, 0)))
+    let promiseNear = try store.addTask(text: "Черновик завтра",
+                                        organization: TaskOrganization(promisedTo: "Редактор",
+                                                                       reviewDate: date(2030, 3, 10, 0, 0),
+                                                                       deadline: date(2030, 3, 16, 0, 0)))
+    let done = try store.addTask(text: "Готово", organization: TaskOrganization(promisedTo: "Кто-то", deadline: date(2030, 3, 1, 0, 0)))
+    _ = try store.completePlan(id: done.id, now: now)
+    let removed = try store.addTask(text: "Снято", organization: TaskOrganization(promisedTo: "Кто-то", atRisk: true))
+    _ = try store.setTaskRemoved(id: removed.id, reason: "Не нужно")
+    let archived = try store.saveProject(title: "Архивный", outcome: "Результат", area: .work, uncertainty: "",
+                                         reviewDate: date(2030, 3, 1, 0, 0))
+    try store.setProjectArchived(id: archived.id, archived: true)
+
+    let groups = store.reviewGroups(now: now)
+    check(groups.map(\.title) == ["Обещания со сроком", "Обещания без срока", "Под угрозой",
+                                  "Сегодня и следующие шаги", "Ожидания", "Пересмотр"], "порядок групп: \(groups.map(\.title))")
+    check(reviewTaskIDs([groups[0]]) == [promiseNear.id, promiseFar.id], "ближайший срок раньше")
+    check(reviewTaskIDs([groups[1]]) == [promiseNoDate.id], "обещание без срока отдельной группой")
+    check(store.plans.first { $0.id == promiseNoDate.id }?.organization?.deadline == nil, "дата обещанию не выдумывается")
+    check(reviewTaskIDs([groups[2]]) == [atRisk.id], "остальные отмеченные под угрозой")
+    check(reviewTaskIDs([groups[3]]) == [today.id], "дела на сегодня")
+    check(reviewTaskIDs([groups[4]]) == [waiting.id], "ожидания с названным условием")
+    check(reviewTaskIDs([groups[5]]) == [dueReview.id], "задача с наступившей датой пересмотра")
+    check(reviewProjectIDs([groups[5]]) == [project.id], "проект без следующего шага")
+    let items = groups.flatMap(\.items)
+    check(Set(items.map(\.id)).count == items.count, "одно дело не повторяется в нескольких группах")
+    check(!reviewTaskIDs(groups).contains(done.id) && !reviewTaskIDs(groups).contains(removed.id), "выполненные и снятые исключены")
+    check(!reviewProjectIDs(groups).contains(archived.id), "архивный проект исключён")
+
+    try store.setNextAction(projectID: project.id, taskID: today.id)
+    let withStep = store.reviewGroups(now: now)
+    check(reviewProjectIDs(withStep).isEmpty, "проект со следующим шагом уходит из пересмотра")
+    check(reviewTaskIDs([withStep[3]]) == [today.id], "следующий шаг остаётся в группе сегодняшних дел без дубля")
+    check(store.reviewGroups(now: date(2030, 3, 1, 9, 0)).map(\.title).first == "Обещания со сроком", "порядок не зависит от выбранного дня")
+}
+
+test("Разбор хаоса: строка уходит только вместе с сохранённой задачей") {
+    let dir = freshDir("chaos-to-task")
+    let store = DiaryStore(directory: dir); try store.load()
+    let created = date(2030, 3, 10, 8, 0)
+    let urgent = try store.addChaosItem(text: "Позвонить редактору", urgent: true, now: created)
+    expectError("пустой текст не создаёт задачу") {
+        _ = try store.makeTask(fromChaos: urgent.id, text: "   ", organization: TaskOrganization(area: .work))
+    }
+    check(store.chaos.map(\.id) == [urgent.id] && store.plans.isEmpty, "после ошибки строка остаётся с тем же id")
+    let task = try store.makeTask(fromChaos: urgent.id, text: "Позвонить редактору и уточнить срок",
+                                  organization: TaskOrganization(area: .work, promisedTo: "Редактор"), now: created)
+    check(store.chaos.isEmpty && store.plans.map(\.id) == [task.id], "успешное сохранение убирает строку и создаёт одну задачу")
+    check(task.text == "Позвонить редактору и уточнить срок" && task.taskArea == .work && task.taskStatus == .ready, "текст и сфера приходят из редактора")
+    check(task.isAtRisk && task.promisedTo == "Редактор", "срочная строка даёт отметку угрозы")
+    check(task.day.isEmpty && task.organization?.deadline == nil && task.organization?.reviewDate == nil, "даты не выдумываются")
+    check(store.entries.isEmpty && store.notes.isEmpty, "разбор места хаоса не пишет дневник")
+    let plain = try store.addChaosItem(text: "Обычная строка", now: created)
+    let plainTask = try store.makeTask(fromChaos: plain.id, text: plain.text, organization: TaskOrganization(area: .personal), now: created)
+    check(!plainTask.isAtRisk && plainTask.taskArea == .personal, "несрочная строка не получает отметку")
+    check(store.sortedChaos().isEmpty, "корзина пуста")
+    expectError("разбор несуществующей строки отклоняется") {
+        _ = try store.makeTask(fromChaos: UUID(), text: "Что-то", organization: TaskOrganization())
+    }
+
+    let conflictDir = freshDir("chaos-conflict")
+    let first = DiaryStore(directory: conflictDir), second = DiaryStore(directory: conflictDir)
+    try first.load(); try second.load()
+    let shared = try first.addChaosItem(text: "Общая строка", now: created)
+    try second.load()
+    _ = try first.addChaosItem(text: "Строка первого экземпляра", now: created)
+    let conflict = expectError("устаревший экземпляр отклоняет разбор") {
+        _ = try second.makeTask(fromChaos: shared.id, text: shared.text, organization: TaskOrganization())
+    }
+    check((conflict as? DiaryError) == .conflictingChanges, "причина конфликта видна")
+    check(second.chaos.map(\.id) == [shared.id] && second.plans.isEmpty, "после сбоя записи строка остаётся, задача не создана")
+    check(first.chaos.contains { $0.id == shared.id }, "свежий файл не потерял строку")
 }
 
 // MARK: Линейные шаги задачи

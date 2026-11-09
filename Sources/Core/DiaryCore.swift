@@ -97,6 +97,7 @@ public enum DiaryDay {
 /// Версия 4: проекты и необязательные поля органайзера в планах.
 /// Версия 5: линейные шаги внутри задачи. Прежние файлы читаются без шагов.
 /// Версия 6: место хаоса, ещё не разобранные записи. Пустой список версию не поднимает.
+/// Версия 7: поля пересмотра — «Кому обещано», «Обещание под угрозой», статус «Снято» и причина снятия.
 /// Файл без планов пишется как v1, с планами без заметок — v2 (его читает и прежняя сборка);
 /// как только появляются заметки — v3.
 public struct ChaosItem: Codable, Identifiable, Equatable, Hashable {
@@ -115,7 +116,7 @@ public struct ChaosItem: Codable, Identifiable, Equatable, Hashable {
 
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     public var format: String
     public var version: Int
@@ -139,7 +140,20 @@ public struct DiaryDocument: Codable {
         let needsV3 = !notes.isEmpty
         let needsV4 = !projects.isEmpty || plans.contains { $0.organization != nil || $0.day.isEmpty }
         let base = plans.contains { $0.steps != nil } ? 5 : (needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1)))
-        self.version = chaos.isEmpty ? base : 6
+        self.version = Self.needsReviewFields(plans) ? 7 : (chaos.isEmpty ? base : 6)
+    }
+
+    /// Версия 7 поднимается только реальными данными пересмотра, а не samym фактом блока полей.
+    static func needsReviewFields(_ plans: [DayPlan]) -> Bool {
+        func filled(_ text: String?) -> Bool {
+            guard let text else { return false }
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return plans.contains { plan in
+            guard let metadata = plan.organization else { return false }
+            return metadata.atRisk || metadata.status == .removed
+                || filled(metadata.promisedTo) || filled(metadata.removalReason)
+        }
     }
 
     enum CodingKeys: String, CodingKey {
@@ -184,6 +198,9 @@ public enum DiaryError: Error, LocalizedError, Equatable {
     case planAlreadyCompleted
     case planIsCompleted
     case planNotCompleted
+    case emptyRemovalReason
+    case taskIsRemoved
+    case taskIsNotRemoved
 
     public var errorDescription: String? {
         switch self {
@@ -207,6 +224,12 @@ public enum DiaryError: Error, LocalizedError, Equatable {
             return "Выполненный пункт нельзя изменить. Сначала верните его в план."
         case .planNotCompleted:
             return "Этот пункт плана ещё не отмечен выполненным."
+        case .emptyRemovalReason:
+            return "Назовите причину снятия — без неё снятие не сохраняется."
+        case .taskIsRemoved:
+            return "Снятую задачу нельзя изменить или выполнить. Сначала верните её в работу."
+        case .taskIsNotRemoved:
+            return "Эта задача не снята."
         }
     }
 }
@@ -417,6 +440,10 @@ public final class DiaryStore {
                 let backup = directory.appendingPathComponent("entries-before-chaos-\(UUID().uuidString).json")
                 try original.write(to: backup, options: .withoutOverwriting)
             }
+            if document.version >= 7, let original = loadedData, try DiaryJSON.decode(original).version < 7 {
+                let backup = directory.appendingPathComponent("entries-before-review-\(UUID().uuidString).json")
+                try original.write(to: backup, options: .withoutOverwriting)
+            }
             try data.write(to: fileURL, options: .atomic)
             loadedData = data
         } catch let error as DiaryError {
@@ -445,11 +472,7 @@ public final class DiaryStore {
     }
 
     static func sortedPlans(_ list: [DayPlan]) -> [DayPlan] {
-        list.sorted { a, b in
-            if a.day != b.day { return a.day < b.day }
-            if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
-            return a.id.uuidString < b.id.uuidString
-        }
+        list.sorted(by: planOrder)
     }
 
     /// Каноничный порядок заметок в файле: по времени создания, добор по id.
@@ -626,6 +649,8 @@ public final class DiaryStore {
     public func completePlan(id: UUID, now: Date = Date()) throws -> (plan: DayPlan, entry: DiaryEntry) {
         guard let i = plans.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
         guard !plans[i].isCompleted else { throw DiaryError.planAlreadyCompleted }
+        // Снятие не считается выполнением: сначала задачу нужно явно вернуть в работу.
+        guard !plans[i].isRemoved else { throw DiaryError.taskIsRemoved }
         let n = diaryNormalized(now)
         let entry = DiaryEntry(text: plans[i].text, context: nil, timestamp: n,
                                createdAt: n, updatedAt: n, planID: id)
