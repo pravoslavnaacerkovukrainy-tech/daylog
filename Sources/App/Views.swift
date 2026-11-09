@@ -1108,7 +1108,7 @@ struct AskView: View {
                 Text("Передача заметок в QwenCloud")
                     .font(.headline).foregroundStyle(Theme.ink)
                     .accessibilityAddTraits(.isHeader)
-                Text("Пока вы не разрешите, заметки никуда не отправляются. Получатель: QwenCloud. Уйдут только отмеченные заметки, ваш вопрос и вопросы и ответы этой беседы. Дневник и план не отправляются. Разрешение само ничего не отправляет.")
+                Text("Пока вы не разрешите, заметки никуда не отправляются. Получатель: QwenCloud. Уйдут только отмеченные заметки, ваш вопрос и вопросы и ответы этой беседы. При изменении набора заметок или отмене передачи беседа начинается заново. Дневник и план не отправляются. Разрешение само ничего не отправляет.")
                     .font(.caption).foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
                 noteChecklist(selection: Binding(get: { pendingSelection }, set: { pendingSelection = $0 }))
@@ -1147,10 +1147,13 @@ struct AskView: View {
                     } label: { Text("Отменить передачу").frame(minHeight: 24).contentShape(Rectangle()) }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Отменить передачу")
-                    .accessibilityHint("Прервать запрос и запретить отправку заметок до нового разрешения")
+                    .accessibilityHint("Прервать запрос, очистить беседу и запретить отправку заметок до нового разрешения")
                 }
                 if showNoteList {
                     noteChecklist(selection: Binding(get: { state.chatSelectedNoteIDs }, set: { state.chatSelectedNoteIDs = $0 }))
+                    Text("При изменении набора заметок или отмене передачи беседа начинается заново.")
+                        .font(.caption).foregroundStyle(Theme.quiet)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if state.chatNotesToSend.isEmpty {
                     Text("Не отмечено ни одной заметки, отправка выключена.")

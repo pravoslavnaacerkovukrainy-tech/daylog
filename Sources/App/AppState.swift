@@ -103,8 +103,12 @@ final class AppState: ObservableObject {
     @Published private(set) var notePolishPreflight: NotePolishPreflight?
     /// Явное согласие передавать выбранные заметки в QwenCloud. Живёт до выхода из приложения.
     @Published private(set) var chatConsentGiven = false
-    /// Заметки, которые человек оставил отмеченными для чата.
-    @Published var chatSelectedNoteIDs: Set<UUID> = []
+    /// Заметки, которые человек оставил отмеченными для чата. Новый набор начинает новую беседу.
+    @Published var chatSelectedNoteIDs: Set<UUID> = [] {
+        didSet {
+            if oldValue != chatSelectedNoteIDs { clearChat() }
+        }
+    }
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
@@ -460,11 +464,11 @@ final class AppState: ObservableObject {
         chatConsentGiven = true
     }
 
-    /// Отменить передачу: идущий запрос прерывается, новые не уходят до нового согласия.
+    /// Отменить передачу: идущий запрос прерывается, беседа очищается, новые запросы ждут согласия.
     func revokeChatConsent() {
-        cancelChatRequest()
         chatConsentGiven = false
         chatSelectedNoteIDs = []
+        clearChat()
     }
 
     func setChatNote(_ id: UUID, selected: Bool) {

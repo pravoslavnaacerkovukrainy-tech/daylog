@@ -2113,6 +2113,7 @@ final class AISpy {
     var summarized: [[DiaryEntry]] = []
     var asked: [(notes: [DiaryNote], history: [ChatMessage], question: String)] = []
     var failure: Error?
+    var askDelayNanoseconds: UInt64 = 0
     var calls: Int { polished.count + summarized.count + asked.count }
     var services: AIServices {
         AIServices(
@@ -2128,6 +2129,9 @@ final class AISpy {
             },
             askNotes: { [unowned self] notes, history, question in
                 self.asked.append((notes, history, question))
+                if self.askDelayNanoseconds > 0 {
+                    try await Task<Never, Never>.sleep(nanoseconds: self.askDelayNanoseconds)
+                }
                 if let failure = self.failure { throw failure }
                 return ("Ответ [1]", [1])
             })
@@ -2263,6 +2267,76 @@ test("P1-06: чат без согласия молчит, уходят толь�
         check(!state.sendChat("Ещё вопрос") && spy.asked.count == 1, "после отмены передачи сеть невозможна")
         state.giveChatConsent(selected: [])
         check(!state.canSendChat && !state.sendChat("Ещё вопрос") && spy.asked.count == 1, "согласие без выбранных заметок не отправляет")
+    }
+}
+
+test("P1-07: неизменный набор сохраняет историю, новый набор очищает её") {
+    MainActor.assumeIsolated {
+        let spy = AISpy()
+        let state = AppState(store: DiaryStore(directory: freshDir("chat-selection-history")), ai: spy.services)
+        check(state.addNote(title: "Альфа", body: "А"), "заметка A")
+        check(state.addNote(title: "Бета", body: "Б"), "заметка B")
+        let ids = Set(state.notes.map(\.id))
+        let beta = state.notes.first { $0.title == "Бета" }!.id
+        state.giveChatConsent(selected: ids)
+        check(state.sendChat("Первый вопрос"), "первый вопрос")
+        pumpMain { !state.chatBusy }
+        check(state.sendChat("Второй вопрос"), "второй вопрос")
+        pumpMain { !state.chatBusy }
+        check(spy.asked.count == 2, "оба вопроса ушли")
+        check(spy.asked[1].history.map(\.text) == ["Первый вопрос", "Ответ [1]"], "при том же наборе история уходит с вопросом")
+        let before = state.chatMessages
+        state.giveChatConsent(selected: ids)
+        state.setChatNote(beta, selected: true)
+        check(state.chatMessages == before, "повтор того же набора беседу не очищает")
+        state.setChatNote(beta, selected: false)
+        check(state.chatMessages.isEmpty, "реальное изменение набора очищает беседу")
+        check(state.sendChat("После смены"), "вопрос после смены набора")
+        pumpMain { !state.chatBusy }
+        check(spy.asked.last?.history.isEmpty == true, "после смены набора прежняя история не уходит")
+    }
+}
+
+test("P1-08: отмена передачи и повторное разрешение начинают пустую беседу") {
+    MainActor.assumeIsolated {
+        let spy = AISpy()
+        let state = AppState(store: DiaryStore(directory: freshDir("chat-revoke-history")), ai: spy.services)
+        _ = state.addNote(title: "Альфа", body: "А")
+        let selected = Set(state.notes.map(\.id))
+        state.giveChatConsent(selected: selected)
+        _ = state.sendChat("До отмены")
+        pumpMain { !state.chatBusy }
+        check(!state.chatMessages.isEmpty, "перед отменой есть история")
+        state.revokeChatConsent()
+        check(state.chatMessages.isEmpty && !state.chatConsentGiven && state.chatSelectedNoteIDs.isEmpty, "отмена очищает беседу и выбор")
+        state.giveChatConsent(selected: selected)
+        check(state.chatMessages.isEmpty, "повторное разрешение не восстанавливает беседу")
+        _ = state.sendChat("После отмены")
+        pumpMain { !state.chatBusy }
+        check(spy.asked.count == 2 && spy.asked[1].history.isEmpty, "запрос после повторного разрешения уходит без прежней истории")
+    }
+}
+
+test("P1-09: смена набора прерывает идущий запрос и отбрасывает поздний ответ") {
+    MainActor.assumeIsolated {
+        let spy = AISpy()
+        spy.askDelayNanoseconds = 5_000_000_000
+        let state = AppState(store: DiaryStore(directory: freshDir("chat-selection-cancel")), ai: spy.services)
+        _ = state.addNote(title: "Альфа", body: "А")
+        _ = state.addNote(title: "Бета", body: "Б")
+        let beta = state.notes.first { $0.title == "Бета" }!.id
+        state.giveChatConsent(selected: Set(state.notes.map(\.id)))
+        _ = state.sendChat("Идущий вопрос")
+        pumpMain { spy.asked.count == 1 }
+        check(state.chatBusy && state.chatMessages.map(\.text) == ["Идущий вопрос"], "запрос ещё выполняется")
+        state.setChatNote(beta, selected: false)
+        check(!state.chatBusy && state.chatMessages.isEmpty, "смена набора прерывает запрос и очищает ленту")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        check(state.chatMessages.isEmpty, "отменённый ответ не возвращается в ленту")
+        spy.askDelayNanoseconds = 0
+        _ = state.sendChat("Новый вопрос")
+        pumpMain { !state.chatBusy }
+        check(spy.asked.count == 2 && spy.asked[1].history.isEmpty, "новый запрос начинается без истории отменённой беседы")
     }
 }
 
