@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/latest">
-    <img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C_%D0%B4%D0%BB%D1%8F_Mac-v0.2.6-2F6690?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать «Хаос Дня» 0.2.6 для Mac" />
+    <img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C_%D0%B4%D0%BB%D1%8F_Mac-v0.2.7-2F6690?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать «Хаос Дня» 0.2.7 для Mac" />
   </a>
 </p>
 
@@ -199,7 +199,9 @@ open "build/Хаос Дня.app"
 
 ## Разработка
 
-Текущий выпуск: **0.2.6, build 8**. Архив приложения доступен на [странице версии](https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/tag/v0.2.6).
+Текущий выпуск: **0.2.7, build 9**. Архив приложения доступен на [странице версии](https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/tag/v0.2.7).
+
+В версии 0.2.7 у задачи появились «Кому обещано», отметка «Обещание под угрозой» и снятие с причиной. Снятие не считается выполнением и не пишет дневник. В «Делах» есть «Обзор» и один поиск по задачам, проектам и строкам места хаоса. Эти поля сохраняются в формате v7 только когда хотя бы одно из них заполнено.
 
 В версии 0.2.6 раздел «Входящие» заменён «Местом хаоса». Строка хранится отдельно от задач и дневника. Её можно отметить как срочную, сделать личной или рабочей задачей, перенести в заметки или снять. Эти действия дневник не пополняют.
 
@@ -229,5 +231,5 @@ docs/             методика, спецификации и планы
 ---
 
 <div align="center">
-  <strong>Личный проект · версия 0.2.6 (build 8)</strong>
+  <strong>Личный проект · версия 0.2.7 (build 9)</strong>
 </div>
