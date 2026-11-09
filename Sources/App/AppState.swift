@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
     @Published private(set) var plans: [DayPlan] = []
     @Published private(set) var notes: [DiaryNote] = []
     @Published private(set) var projects: [DiaryProject] = []
+    @Published private(set) var chaos: [ChaosItem] = []
     private var breakdownDrafts: [UUID: TaskBreakdownDraft] = [:]
 
     func breakdownDraft(for task: DayPlan) -> TaskBreakdownDraft {
@@ -87,6 +88,7 @@ final class AppState: ObservableObject {
         plans = store.plans
         notes = store.notes
         projects = store.projects
+        chaos = store.chaos
         // Обновление происходит после мутации хранилища, вне вычисления SwiftUI body.
         for (id, draft) in breakdownDrafts {
             if let current = plans.first(where: { $0.id == id }) { draft.reopen(parent: current) }

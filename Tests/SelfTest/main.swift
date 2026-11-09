@@ -533,10 +533,10 @@ test("Документ: v2-файл читается как notes=[]") {
     let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
     check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
 }
-test("Документ: будущая версия 6 отвергается как неподдерживаемая") {
-    let v4 = #"{"format":"daylog","version":6,"entries":[],"notes":[]}"#.data(using: .utf8)!
-    let err = expectError("v5 не поддерживается") { _ = try DiaryJSON.decode(v4) }
-    check((err as? DiaryError) == .unsupportedFormat("версия 6, приложение понимает версию до 5"), "сообщение про версию: \(String(describing: err))")
+test("Документ: будущая версия 7 отвергается как неподдерживаемая") {
+    let future = #"{"format":"daylog","version":7,"entries":[],"notes":[]}"#.data(using: .utf8)!
+    let err = expectError("v7 не поддерживается") { _ = try DiaryJSON.decode(future) }
+    check((err as? DiaryError) == .unsupportedFormat("версия 7, приложение понимает версию до 6"), "сообщение про версию: \(String(describing: err))")
 }
 
 // MARK: Заметки — хранилище
@@ -1236,6 +1236,39 @@ test("Органайзер: экспорт всех метаданных и пр
     check(human.contains("Уточнить формат") && human.contains("Ожидаю") && human.contains("Ответ"), "ожидания и неопределённость читаются в Markdown")
     let single = try store.exportMarkdown()
     check(single.contains("Органайзер") && single.contains("Без дня") && single.contains("Результат"), "единый Markdown также включает новые данные")
+}
+
+test("Место хаоса: запись не становится задачей, заметкой или дневником") {
+    let dir = freshDir("chaos-place")
+    let store = DiaryStore(directory: dir); try store.load()
+    let later = date(2030, 3, 10, 9, 0)
+    let early = date(2030, 3, 10, 8, 0)
+    let plain = try store.addChaosItem(text: "  Идея без места  ", now: early)
+    let urgent = try store.addChaosItem(text: "Черновик обещан, а ответа нет", urgent: true, now: later)
+    check(store.chaos.count == 2 && store.plans.isEmpty && store.notes.isEmpty && store.entries.isEmpty, "корзина не создаёт задачу, заметку и дневник")
+    check(store.sortedChaos().map(\.id) == [urgent.id, plain.id], "срочное стоит первым")
+    check(plain.text == "Идея без места", "пробелы по краям снимаются")
+    let reloaded = DiaryStore(directory: dir); try reloaded.load()
+    check(reloaded.chaos == store.chaos, "записи читаются после перезапуска")
+    let data = try Data(contentsOf: store.fileURL)
+    let document = try DiaryJSON.decode(data)
+    check(document.version == 6, "непустая корзина поднимает файл до версии 6")
+    expectError("пустая строка не записывается") { _ = try store.addChaosItem(text: "   ") }
+    let removed = try store.deleteChaosItem(id: plain.id)
+    try store.restoreChaosItem(removed)
+    check(store.chaos.contains(where: { $0.id == plain.id }), "снятую запись можно вернуть")
+    let task = try store.makeTask(fromChaos: urgent.id, area: .work)
+    check(task.taskArea == .work && task.taskStatus == .ready && task.day.isEmpty, "задача выходит без дня и без срока")
+    check(!store.chaos.contains(where: { $0.id == urgent.id }) && store.entries.isEmpty, "задача покидает корзину и не пишет дневник")
+    let note = try store.makeNote(fromChaos: plain.id)
+    check(note.title == "Идея без места" && note.body == "Идея без места" && store.chaos.isEmpty && store.entries.isEmpty, "заметка забирает запись и не пишет дневник")
+    let old = """
+    {"format":"daylog","version":5,"entries":[],"plans":[{"id":"11111111-1111-1111-1111-111111111111","text":"Старая","day":"","createdAt":"2030-03-10T08:00:00Z","updatedAt":"2030-03-10T08:00:00Z","organization":{"area":"personal","status":"inbox"}}]}
+    """
+    let oldDir = freshDir("chaos-old")
+    try old.write(to: oldDir.appendingPathComponent("entries.json"), atomically: true, encoding: .utf8)
+    let oldStore = DiaryStore(directory: oldDir); try oldStore.load()
+    check(oldStore.chaos.isEmpty && oldStore.plans.count == 1 && oldStore.plans[0].taskStatus == .inbox, "старый файл без корзины читается")
 }
 
 test("Хранилище: два экземпляра не перезаписывают свежие данные") {

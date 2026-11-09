@@ -11,7 +11,7 @@ public enum TaskStatus: String, Codable, CaseIterable, Identifiable {
     public var id: String { rawValue }
     public var title: String {
         switch self {
-        case .inbox: return "Входящие"
+        case .inbox: return "Место хаоса"
         case .ready: return "Можно делать"
         case .waiting: return "Ожидаю"
         case .paused: return "Отложено"
@@ -76,7 +76,7 @@ public struct DiaryProject: Codable, Identifiable, Equatable, Hashable {
 }
 
 public extension DiaryStore {
-    var hasOrganizerData: Bool { !projects.isEmpty || plans.contains { $0.organization != nil || $0.steps != nil } }
+    var hasOrganizerData: Bool { !projects.isEmpty || !chaos.isEmpty || plans.contains { $0.organization != nil || $0.steps != nil } }
 
     func organizerMarkdown(calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()
@@ -96,6 +96,13 @@ public extension DiaryStore {
             if !project.uncertainty.isEmpty { output += "\nНужно выяснить:\n" + quoted(project.uncertainty) + "\n" }
             if let review = project.reviewDate { output += "\nПересмотреть: \(formatter.string(from: review)).\n" }
             if let next = plans.first(where: { $0.id == project.nextActionID }) { output += "\nСледующий шаг:\n" + quoted(next.text) + "\n" }
+        }
+        if !chaos.isEmpty {
+            output += "\n### Место хаоса\n"
+            for item in sortedChaos() {
+                output += "\n" + quoted(item.text) + "\n"
+                if item.urgent { output += "\nНе может ждать.\n" }
+            }
         }
         output += "\n### Задачи\n"
         for task in Self.sortedPlans(plans) {
@@ -224,5 +231,67 @@ public extension DiaryStore {
         copy.reviewDate = copy.reviewDate.map { calendar.startOfDay(for: $0) }
         copy.deadline = copy.deadline.map { calendar.startOfDay(for: $0) }
         return copy
+    }
+
+    func sortedChaos() -> [ChaosItem] {
+        chaos.sorted { a, b in
+            if a.urgent != b.urgent { return a.urgent && !b.urgent }
+            if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    @discardableResult
+    func addChaosItem(text: String, urgent: Bool = false, now: Date = Date()) throws -> ChaosItem {
+        let title = Self.cleanText(text)
+        guard !title.isEmpty else { throw DiaryError.emptyText }
+        let item = ChaosItem(text: title, createdAt: diaryNormalized(now), urgent: urgent)
+        try persist(entries: entries, plans: plans, notes: notes, chaos: chaos + [item])
+        return item
+    }
+
+    @discardableResult
+    func setChaosUrgent(id: UUID, _ urgent: Bool) throws -> ChaosItem {
+        guard let index = chaos.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        var copy = chaos
+        copy[index].urgent = urgent
+        let updated = copy[index]
+        try persist(entries: entries, plans: plans, notes: notes, chaos: copy)
+        return updated
+    }
+
+    @discardableResult
+    func deleteChaosItem(id: UUID) throws -> ChaosItem {
+        guard let item = chaos.first(where: { $0.id == id }) else { throw DiaryError.notFound }
+        try persist(entries: entries, plans: plans, notes: notes, chaos: chaos.filter { $0.id != id })
+        return item
+    }
+
+    func restoreChaosItem(_ item: ChaosItem) throws {
+        guard !chaos.contains(where: { $0.id == item.id }) else { return }
+        try persist(entries: entries, plans: plans, notes: notes, chaos: chaos + [item])
+    }
+
+    /// Решение «это задача». Запись покидает место хаоса и не пишет строку в дневник.
+    @discardableResult
+    func makeTask(fromChaos id: UUID, area: TaskArea, now: Date = Date()) throws -> DayPlan {
+        guard let item = chaos.first(where: { $0.id == id }) else { throw DiaryError.notFound }
+        let metadata = try checkedOrganization(TaskOrganization(area: area, status: .ready), calendar: .current)
+        let stamp = diaryNormalized(now)
+        var task = DayPlan(text: item.text, day: "", createdAt: stamp, updatedAt: stamp)
+        task.organization = metadata
+        try persist(entries: entries, plans: plans + [task], notes: notes, chaos: chaos.filter { $0.id != id })
+        return task
+    }
+
+    /// Решение «это заметка». Дневник не меняется.
+    @discardableResult
+    func makeNote(fromChaos id: UUID, now: Date = Date()) throws -> DiaryNote {
+        guard let item = chaos.first(where: { $0.id == id }) else { throw DiaryError.notFound }
+        let stamp = diaryNormalized(now)
+        let firstLine = item.text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? item.text
+        let note = DiaryNote(title: DiaryStore.cleanTitle(firstLine), body: item.text, createdAt: stamp, updatedAt: stamp)
+        try persist(entries: entries, plans: plans, notes: notes + [note], chaos: chaos.filter { $0.id != id })
+        return note
     }
 }

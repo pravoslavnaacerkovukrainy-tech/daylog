@@ -96,11 +96,26 @@ public enum DiaryDay {
 /// Версия 1 — только записи. Версия 2 — записи + планы и связи. Версия 3 — + заметки.
 /// Версия 4: проекты и необязательные поля органайзера в планах.
 /// Версия 5: линейные шаги внутри задачи. Прежние файлы читаются без шагов.
+/// Версия 6: место хаоса, ещё не разобранные записи. Пустой список версию не поднимает.
 /// Файл без планов пишется как v1, с планами без заметок — v2 (его читает и прежняя сборка);
 /// как только появляются заметки — v3.
+public struct ChaosItem: Codable, Identifiable, Equatable, Hashable {
+    public var id: UUID
+    public var text: String
+    public var createdAt: Date
+    public var urgent: Bool
+
+    public init(id: UUID = UUID(), text: String, createdAt: Date, urgent: Bool = false) {
+        self.id = id
+        self.text = text
+        self.createdAt = createdAt
+        self.urgent = urgent
+    }
+}
+
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     public var format: String
     public var version: Int
@@ -109,23 +124,26 @@ public struct DiaryDocument: Codable {
     public var plans: [DayPlan]
     public var notes: [DiaryNote]
     public var projects: [DiaryProject]
+    public var chaos: [ChaosItem]
 
     public init(entries: [DiaryEntry], plans: [DayPlan] = [], notes: [DiaryNote] = [], exportedAt: Date? = nil,
-                projects: [DiaryProject] = []) {
+                projects: [DiaryProject] = [], chaos: [ChaosItem] = []) {
         self.format = DiaryDocument.formatName
         self.exportedAt = exportedAt
         self.entries = entries
         self.plans = plans
         self.notes = notes
         self.projects = projects
+        self.chaos = chaos
         let needsV2 = !plans.isEmpty || entries.contains { $0.planID != nil }
         let needsV3 = !notes.isEmpty
         let needsV4 = !projects.isEmpty || plans.contains { $0.organization != nil || $0.day.isEmpty }
-        self.version = plans.contains { $0.steps != nil } ? 5 : (needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1)))
+        let base = plans.contains { $0.steps != nil } ? 5 : (needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1)))
+        self.version = chaos.isEmpty ? base : 6
     }
 
     enum CodingKeys: String, CodingKey {
-        case format, version, exportedAt, entries, plans, notes, projects
+        case format, version, exportedAt, entries, plans, notes, projects, chaos
     }
 
     public init(from decoder: Decoder) throws {
@@ -137,6 +155,7 @@ public struct DiaryDocument: Codable {
         plans = try c.decodeIfPresent([DayPlan].self, forKey: .plans) ?? []
         notes = try c.decodeIfPresent([DiaryNote].self, forKey: .notes) ?? []
         projects = try c.decodeIfPresent([DiaryProject].self, forKey: .projects) ?? []
+        chaos = try c.decodeIfPresent([ChaosItem].self, forKey: .chaos) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -148,6 +167,7 @@ public struct DiaryDocument: Codable {
         if !plans.isEmpty { try c.encode(plans, forKey: .plans) }
         if !notes.isEmpty { try c.encode(notes, forKey: .notes) }
         if !projects.isEmpty { try c.encode(projects, forKey: .projects) }
+        if !chaos.isEmpty { try c.encode(chaos, forKey: .chaos) }
     }
 }
 
@@ -300,6 +320,7 @@ public final class DiaryStore {
     public private(set) var plans: [DayPlan] = []
     public private(set) var notes: [DiaryNote] = []
     public private(set) var projects: [DiaryProject] = []
+    public private(set) var chaos: [ChaosItem] = []
     public private(set) var blockReason: String?
     public var isBlocked: Bool { blockReason != nil }
 
@@ -329,6 +350,7 @@ public final class DiaryStore {
             plans = []
             notes = []
             projects = []
+            chaos = []
             return
         }
         do {
@@ -343,12 +365,14 @@ public final class DiaryStore {
             plans = DiaryStore.sortedPlans(doc.plans)
             notes = DiaryStore.sortNotesCanonical(doc.notes)
             projects = doc.projects
+            chaos = doc.chaos
             loadedData = data
         } catch {
             entries = []
             plans = []
             notes = []
             projects = []
+            chaos = []
             let diaryError = (error as? DiaryError) ?? DiaryError.unreadable(error.localizedDescription)
             blockReason = (diaryError.errorDescription ?? "ошибка чтения") + " Файл: \(fileURL.path)"
             throw diaryError
@@ -357,12 +381,13 @@ public final class DiaryStore {
 
     /// Единственная точка записи: записи, планы и заметки пишутся одним атомарным файлом.
     func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan], notes newNotes: [DiaryNote],
-                 projects newProjects: [DiaryProject]? = nil) throws {
+                 projects newProjects: [DiaryProject]? = nil, chaos newChaos: [ChaosItem]? = nil) throws {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
         let sortedEntries = DiaryStore.sorted(newEntries)
         let sortedPlans = DiaryStore.sortedPlans(newPlans)
         let sortedNotes = DiaryStore.sortNotesCanonical(newNotes)
         var projectCopy = newProjects ?? projects
+        let chaosCopy = newChaos ?? chaos
         for index in projectCopy.indices {
             if let id = projectCopy[index].nextActionID,
                !sortedPlans.contains(where: { $0.id == id && $0.projectID == projectCopy[index].id && !$0.isCompleted && $0.taskStatus == .ready }) {
@@ -370,7 +395,7 @@ public final class DiaryStore {
             }
         }
         do {
-            let document = DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes, projects: projectCopy)
+            let document = DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes, projects: projectCopy, chaos: chaosCopy)
             let data = try DiaryJSON.encoder().encode(document)
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
             let lockPath = directory.appendingPathComponent(".entries.lock").path
@@ -388,6 +413,10 @@ public final class DiaryStore {
                 let backup = directory.appendingPathComponent("entries-before-steps-\(UUID().uuidString).json")
                 try original.write(to: backup, options: .withoutOverwriting)
             }
+            if document.version >= 6, let original = loadedData, try DiaryJSON.decode(original).version < 6 {
+                let backup = directory.appendingPathComponent("entries-before-chaos-\(UUID().uuidString).json")
+                try original.write(to: backup, options: .withoutOverwriting)
+            }
             try data.write(to: fileURL, options: .atomic)
             loadedData = data
         } catch let error as DiaryError {
@@ -399,6 +428,7 @@ public final class DiaryStore {
         plans = sortedPlans
         notes = sortedNotes
         projects = projectCopy
+        chaos = chaosCopy
     }
 
     /// Перегрузка для записей/планов: заметки не меняются.
@@ -741,7 +771,7 @@ public final class DiaryStore {
 
     public func exportJSON(now: Date = Date()) throws -> Data {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
-        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now), projects: projects))
+        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now), projects: projects, chaos: chaos))
     }
 
     public static func parseExport(_ data: Data) throws -> [DiaryEntry] {

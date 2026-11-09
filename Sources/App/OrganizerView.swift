@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum OrganizerSection: String, CaseIterable, Identifiable {
-    case today = "Сегодня", inbox = "Входящие", projects = "Проекты"
+    case today = "Сегодня", inbox = "Место хаоса", projects = "Проекты"
     case waiting = "Ожидаю", review = "Обзор", all = "Все задачи"
     var id: String { rawValue }
     var icon: String {
@@ -195,10 +195,16 @@ struct OrganizerView: View {
         VStack(spacing: 0) {
             if current == .inbox {
                 HStack {
-                    TextField("Быстро записать мысль или задачу", text: $state.organizerCaptureText).onSubmit(capture)
+                    TextField("Задача, заметка или идея", text: $state.organizerCaptureText).onSubmit(capture)
                         .textFieldStyle(.roundedBorder)
-                    Button("Добавить", action: capture)
+                    Button("Записать", action: capture)
                         .disabled(state.organizerCaptureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
+                }.padding(.horizontal, 20).padding(.vertical, 12)
+            }
+            if current == .today, !urgentChaos.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Не может ждать").font(.headline)
+                    ForEach(urgentChaos) { chaosRow($0) }
                 }.padding(.horizontal, 20).padding(.vertical, 12)
             }
             if current == .all {
@@ -206,6 +212,9 @@ struct OrganizerView: View {
                     .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 20).padding(.vertical, 10)
             }
             List {
+                if current == .inbox {
+                    ForEach(visibleChaos) { chaosRow($0) }
+                }
                 if current == .review, !reviewProjects.isEmpty {
                     Section("Проекты для пересмотра") {
                         ForEach(reviewProjects) { project in
@@ -246,10 +255,10 @@ struct OrganizerView: View {
                 }
             }.listStyle(.inset)
                 .overlay {
-                    if tasks.isEmpty && current != .today && (current != .review || reviewProjects.isEmpty) {
+                    if tasks.isEmpty && visibleChaos.isEmpty && current != .today && (current != .review || reviewProjects.isEmpty) {
                         emptyState
                     }
-                    if current == .today && tasks.isEmpty && !matchingTasks.contains(where: { !$0.isCompleted && $0.day.isEmpty && $0.taskStatus == .ready }) {
+                    if current == .today && tasks.isEmpty && urgentChaos.isEmpty && !matchingTasks.contains(where: { !$0.isCompleted && $0.day.isEmpty && $0.taskStatus == .ready }) {
                         emptyState
                     }
                 }
@@ -263,7 +272,7 @@ struct OrganizerView: View {
             Text(emptyDetail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
             if current == .today {
-                Button("Открыть входящие") { section = .inbox }
+                Button("Открыть место хаоса") { section = .inbox }
             }
         }.padding(24)
     }
@@ -271,7 +280,7 @@ struct OrganizerView: View {
     private var emptyTitle: String {
         switch current {
         case .today: return "Выберите, чем заняться сегодня"
-        case .inbox: return "Освободите голову"
+        case .inbox: return "Сюда можно сбросить всё, что ещё не решено"
         case .waiting: return "Ожиданий пока нет"
         case .review: return "Пересмотр пока не требуется"
         default: return "Здесь появятся задачи"
@@ -279,7 +288,7 @@ struct OrganizerView: View {
     }
     private var emptyDetail: String {
         switch current {
-        case .inbox: return "Запишите мысль одной строкой. Уточнить результат и выбрать проект можно позже."
+        case .inbox: return "Одна строка. Задачей, заметкой или снятием она станет позже, когда вы сами это решите."
         case .waiting: return "Укажите в задаче, чей ответ или какое событие нужно, и когда к ней вернуться."
         case .review: return "Здесь появятся задачи с наступившей датой пересмотра и проекты без следующего шага."
         default: return "Добавьте задачу или запланируйте действие из общего списка."
@@ -458,8 +467,58 @@ struct OrganizerView: View {
         }
     }
 
+    private var sortedChaos: [ChaosItem] {
+        state.chaos.sorted { a, b in
+            if a.urgent != b.urgent { return a.urgent && !b.urgent }
+            if a.createdAt != b.createdAt { return a.createdAt > b.createdAt }
+            return a.id.uuidString < b.id.uuidString
+        }
+    }
+
+    private var urgentChaos: [ChaosItem] { sortedChaos.filter(\.urgent) }
+
+    private var visibleChaos: [ChaosItem] {
+        sortedChaos.filter { query.isEmpty || $0.text.localizedCaseInsensitiveContains(query) }
+    }
+
+    private func chaosRow(_ item: ChaosItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(item.text).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Button(item.urgent ? "Может подождать" : "Не может ждать") {
+                    state.changeOrganizer(item.urgent ? "Отметка снята" : "Отмечено: не может ждать") {
+                        _ = try state.store.setChaosUrgent(id: item.id, !item.urgent)
+                    }
+                }
+                Menu("Это задача") {
+                    Button("Личное") { decideTask(item, area: .personal) }
+                    Button("Работа") { decideTask(item, area: .work) }
+                }
+                Button("Это заметка") {
+                    state.changeOrganizer("Запись стала заметкой") {
+                        _ = try state.store.makeNote(fromChaos: item.id)
+                    }
+                }
+                Button("Снять", role: .destructive) {
+                    state.changeOrganizer("Запись снята") {
+                        _ = try state.store.deleteChaosItem(id: item.id)
+                    }
+                }
+            }
+            .font(.caption)
+            .disabled(state.isBlocked)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func decideTask(_ item: ChaosItem, area: TaskArea) {
+        state.changeOrganizer("Запись стала задачей") {
+            _ = try state.store.makeTask(fromChaos: item.id, area: area)
+        }
+    }
+
     private func newTask(project: DiaryProject? = nil) {
-        let status: TaskStatus = current == .inbox ? .inbox : (current == .waiting ? .waiting : .ready)
+        let status: TaskStatus = current == .waiting ? .waiting : .ready
         taskSheet = TaskSheet(projectID: project?.id, area: project?.area ?? scope.defaultArea,
                               status: status, plannedDay: current == .today ? Date() : nil)
     }
@@ -474,8 +533,8 @@ struct OrganizerView: View {
     }
     private func capture() {
         guard !state.organizerCaptureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if state.changeOrganizer("Добавлено во входящие", {
-            _ = try state.store.addTask(text: state.organizerCaptureText, organization: TaskOrganization(area: scope.defaultArea, status: .inbox))
+        if state.changeOrganizer("Записано в место хаоса", {
+            _ = try state.store.addChaosItem(text: state.organizerCaptureText)
         }) { state.organizerCaptureText = "" }
     }
     private func scheduleToday(_ task: DayPlan) {
