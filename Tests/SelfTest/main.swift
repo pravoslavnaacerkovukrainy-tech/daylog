@@ -1530,6 +1530,16 @@ test("Пересмотр: порядок групп, первое совпаде
     check(store.reviewGroups(now: date(2030, 3, 1, 9, 0)).map(\.title).first == "Обещания со сроком", "порядок не зависит от выбранного дня")
 }
 
+test("Обзор: на пустом хранилище все шесть групп на месте и пусты") {
+    let dir = freshDir("review-empty-groups")
+    let store = DiaryStore(directory: dir); try store.load()
+    let groups = store.reviewGroups(now: date(2030, 3, 10, 9, 0))
+    check(groups.map(\.title) == ["Обещания со сроком", "Обещания без срока", "Под угрозой",
+                                  "Сегодня и следующие шаги", "Ожидания", "Пересмотр"], "порядок пустых групп: \(groups.map(\.title))")
+    check(groups.count == 6, "ровно шесть групп")
+    check(groups.allSatisfy { $0.items.isEmpty }, "все группы пусты")
+}
+
 test("Разбор хаоса: строка уходит только вместе с сохранённой задачей") {
     let dir = freshDir("chaos-to-task")
     let store = DiaryStore(directory: dir); try store.load()

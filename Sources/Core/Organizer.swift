@@ -530,7 +530,7 @@ public extension DiaryStore {
             return fresh.map { ReviewItem.task($0) }
         }
         func append(_ title: String, _ items: [ReviewItem]) {
-            if !items.isEmpty { groups.append(ReviewGroup(title: title, items: items)) }
+            groups.append(ReviewGroup(title: title, items: items))
         }
 
         // 1. Обещания со сроком: ближайшие раньше.

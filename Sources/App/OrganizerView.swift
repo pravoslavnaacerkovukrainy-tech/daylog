@@ -113,14 +113,14 @@ struct OrganizerView: View {
     /// Порядок пересмотра задаёт хранилище; здесь остаётся только фильтр по сфере.
     private var reviewGroups: [ReviewGroup] {
         _ = state.plans; _ = state.projects
-        return state.store.reviewGroups(now: now).compactMap { group in
+        return state.store.reviewGroups(now: now).map { group in
             let items = group.items.filter { item in
                 switch item {
                 case .task(let task): return scope.includes(task.taskArea)
                 case .project(let project): return scope.includes(project.area)
                 }
             }
-            return items.isEmpty ? nil : ReviewGroup(title: group.title, items: items)
+            return ReviewGroup(title: group.title, items: items)
         }
     }
 
@@ -300,17 +300,36 @@ struct OrganizerView: View {
                     ForEach(sortedChaos) { chaosRow($0) }
                 }
                 if current == .review {
-                    ForEach(reviewGroups) { group in
+                    let groups = reviewGroups
+                    ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                        let isLast = index == groups.count - 1
                         Section {
-                            ForEach(group.items) { item in
-                                switch item {
-                                case .task(let task): taskRow(task)
-                                case .project(let project): reviewProjectRow(project)
+                            if group.items.isEmpty {
+                                Text("Сейчас здесь ничего нет").font(.system(size: 13)).foregroundStyle(Theme.quiet)
+                                    .padding(.leading, 28).padding(.vertical, 5)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(alignment: .leading) { reviewRail(hidden: isLast) }
+                            } else {
+                                ForEach(group.items) { item in
+                                    Group {
+                                        switch item {
+                                        case .task(let task): taskRow(task)
+                                        case .project(let project): reviewProjectRow(project)
+                                        }
+                                    }
+                                    .padding(.leading, 28)
+                                    .background(alignment: .leading) { reviewRail(hidden: isLast) }
                                 }
                             }
                         } header: {
-                            Text(group.title).font(Theme.groupTitle)
-                                .foregroundStyle(group.title == "Под угрозой" ? Theme.signal : Theme.ink)
+                            HStack(alignment: .firstTextBaseline, spacing: 17) {
+                                reviewNode(empty: group.items.isEmpty, threat: group.title == "Под угрозой")
+                                    .accessibilityHidden(true)
+                                Text(group.title).font(Theme.groupTitle)
+                                    .foregroundStyle(group.items.isEmpty ? Theme.quiet
+                                                     : group.title == "Под угрозой" ? Theme.signal : Theme.ink)
+                                    .accessibilityAddTraits(.isHeader)
+                            }
                         }
                     }
                 } else if !tasks.isEmpty {
@@ -335,11 +354,27 @@ struct OrganizerView: View {
                     if current == .today {
                         if tasks.isEmpty && urgentChaos.isEmpty && suggestions.isEmpty { emptyState }
                     } else if current == .review {
-                        if reviewGroups.isEmpty { emptyState }
+                        EmptyView()
                     } else if tasks.isEmpty && sortedChaos.isEmpty {
                         emptyState
                     }
                 }
+        }
+    }
+
+    /// Узел оси «Обзора»: заполнен у группы с делами, кольцо у пустой; охра только у «Под угрозой».
+    private func reviewNode(empty: Bool, threat: Bool) -> some View {
+        Circle()
+            .fill(empty ? Color.clear : (threat ? Theme.signal : Theme.quiet))
+            .overlay(Circle().strokeBorder(Theme.rail, lineWidth: empty ? 1.5 : 0))
+            .frame(width: 11, height: 11)
+    }
+
+    /// Отрезок вертикальной оси слева от строк группы; у последней группы оси дальше нет.
+    @ViewBuilder
+    private func reviewRail(hidden: Bool) -> some View {
+        if !hidden {
+            Rectangle().fill(Theme.rail).frame(width: 1).padding(.leading, 5)
         }
     }
 
