@@ -139,8 +139,9 @@ struct OrganizerView: View {
                 content
             }
             .frame(minWidth: 450, maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Theme.canvas)
         }
+        .tint(Theme.accent)
         .onChange(of: section) { _, value in
             if value != .projects { selectedProjectID = nil }
             query = ""
@@ -221,7 +222,7 @@ struct OrganizerView: View {
                         .disabled(state.isBlocked)
                 }
             }
-        }.padding(20)
+        }.padding(24)
     }
 
     @ViewBuilder private var content: some View {
@@ -267,7 +268,7 @@ struct OrganizerView: View {
             Toggle("Показывать выполненные", isOn: $showCompleted).toggleStyle(QuietCheckboxStyle())
             Toggle("Показывать снятые", isOn: $showRemoved).toggleStyle(QuietCheckboxStyle())
             Spacer()
-        }.padding(.horizontal, 20).padding(.vertical, 10)
+        }.padding(.horizontal, 24).padding(.vertical, 10)
     }
 
     private var taskList: some View {
@@ -280,13 +281,13 @@ struct OrganizerView: View {
                         .accessibilityLabel("Быстрая запись в место хаоса")
                     Button("Записать", action: capture)
                         .disabled(state.organizerCaptureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
-                }.padding(.horizontal, 20).padding(.vertical, 12)
+                }.padding(.horizontal, 24).padding(.vertical, 12)
             }
             if current == .today, !urgentChaos.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Не может ждать").font(.headline).foregroundStyle(Theme.signal)
                     ForEach(urgentChaos) { chaosRow($0) }
-                }.padding(.horizontal, 20).padding(.vertical, 12)
+                }.padding(.horizontal, 24).padding(.vertical, 12)
             }
             if current == .all { visibilityToggles }
             List {
@@ -315,7 +316,7 @@ struct OrganizerView: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(task.text)
-                                    Text(task.taskArea.title).font(.caption).foregroundStyle(.secondary)
+                                    Text(task.taskArea.title).font(.caption).foregroundStyle(Theme.quiet)
                                 }
                                 Spacer()
                                 Button("На сегодня") { scheduleToday(task) }.disabled(state.isBlocked)
@@ -343,9 +344,9 @@ struct OrganizerView: View {
             selectedProjectID = project.id
         } label: {
             VStack(alignment: .leading, spacing: 4) {
-                Text(project.title).foregroundStyle(.primary)
+                Text(project.title).foregroundStyle(Theme.ink)
                 Text(project.nextActionID == nil ? "Определите следующий шаг" : "Наступила дата пересмотра")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Theme.quiet)
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5).contentShape(Rectangle())
         }.buttonStyle(.plain)
     }
@@ -368,7 +369,7 @@ struct OrganizerView: View {
                 .frame(maxWidth: 520, alignment: .leading)
             action().padding(.top, 6)
         }
-        .padding(.horizontal, 20).padding(.vertical, 16)
+        .padding(.horizontal, 24).padding(.vertical, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -403,13 +404,13 @@ struct OrganizerView: View {
                 if task.isCompleted { reopening = task } else if !task.taskSteps.isEmpty { completing = task } else { state.completePlan(task) }
             } label: {
                 Image(systemName: task.isCompleted ? "checkmark.circle.fill" : (task.isRemoved ? "xmark.circle" : "circle"))
-                    .font(.system(size: 20)).foregroundStyle(task.isCompleted ? Color.accentColor : Color.secondary)
+                    .font(.system(size: 20)).foregroundStyle(task.isCompleted ? Theme.accent : Theme.quiet)
                     .compactHitArea()
             }.buttonStyle(.plain).padding(.top, -2).disabled(state.isBlocked || task.isRemoved)
                 .accessibilityLabel(task.isCompleted ? "Вернуть задачу: \(task.text)" : "Выполнить задачу: \(task.text)")
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(task.text).strikethrough(task.isCompleted).foregroundStyle(task.isCompleted || task.isRemoved ? .secondary : .primary)
+                    Text(task.text).strikethrough(task.isCompleted).foregroundStyle(task.isCompleted || task.isRemoved ? Theme.quiet : Theme.ink)
                         .onTapGesture { if task.isOpen { edit(task) } }
                     Spacer(minLength: 8)
                     if task.isOpen {
@@ -424,9 +425,9 @@ struct OrganizerView: View {
                         Label(project.title, systemImage: project.nextActionID == task.id ? "arrow.right.circle.fill" : "folder")
                     }
                     if task.taskStatus != .ready && !task.isCompleted { Text(task.taskStatus.title) }
-                }.font(.caption).foregroundStyle(.secondary)
+                }.font(.caption).foregroundStyle(Theme.quiet)
                 if task.isOpen, let promised = task.promisedTo {
-                    Label("Кому обещано · \(promised)", systemImage: "person.2").font(.callout).foregroundStyle(.secondary)
+                    Label("Кому обещано · \(promised)", systemImage: "person.2").font(.callout).foregroundStyle(Theme.quiet)
                 }
                 if task.isOpen, task.isAtRisk {
                     Label("Обещание под угрозой", systemImage: "exclamationmark.triangle")
@@ -434,34 +435,34 @@ struct OrganizerView: View {
                 }
                 if let reason = task.removalReason {
                     Label("Причина снятия · \(reason)", systemImage: "xmark.circle")
-                        .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                        .font(.callout).foregroundStyle(Theme.quiet).textSelection(.enabled)
                 }
                 if task.taskStatus == .waiting, let who = task.organization?.waitingFor, !task.isCompleted {
-                    Label(who, systemImage: "hourglass").font(.callout).foregroundStyle(.secondary)
+                    Label(who, systemImage: "hourglass").font(.callout).foregroundStyle(Theme.quiet)
                 }
                 if !task.taskSteps.isEmpty {
                     if let next = task.nextStep {
                         Label(task.isCompleted ? "Незавершённый шаг: \(next.text)" : "Следующий: \(next.text)", systemImage: "arrow.right.circle").font(.callout)
                     } else {
-                        Text(task.isCompleted ? "Результат задачи подтверждён." : "Шаги выполнены. Подтвердите результат задачи.").font(.callout).foregroundStyle(.secondary)
+                        Text(task.isCompleted ? "Результат задачи подтверждён." : "Шаги выполнены. Подтвердите результат задачи.").font(.callout).foregroundStyle(Theme.quiet)
                     }
                     Text("Выполнено шагов: \(task.taskSteps.filter(\.isCompleted).count) из \(task.taskSteps.count)")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Theme.quiet)
                 }
                 Button { breakdownTask = task } label: {
                     Text(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги").frame(minHeight: 24).contentShape(Rectangle())
                 }
                     .buttonStyle(.borderless).disabled(state.isBlocked)
                     .padding(.vertical, -4)
-                if !task.day.isEmpty { Text("День работы · \(task.day)").font(.caption).foregroundStyle(.secondary) }
+                if !task.day.isEmpty { Text("День работы · \(task.day)").font(.caption).foregroundStyle(Theme.quiet) }
                 if let deadline = task.organization?.deadline {
                     Label("Срок · \(DiaryFormat.shortDate(deadline))", systemImage: "flag")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Theme.quiet)
                 }
                 if let date = task.organization?.reviewDate, !task.isCompleted {
                     Label("Пересмотреть · \(DiaryFormat.shortDate(date))", systemImage: "arrow.triangle.2.circlepath")
                         .font(.caption.weight(isReviewDue(date) ? .medium : .regular))
-                        .foregroundStyle(isReviewDue(date) ? Theme.ink : Color.secondary)
+                        .foregroundStyle(isReviewDue(date) ? Theme.ink : Theme.quiet)
                 }
             }.contentShape(Rectangle())
         }.padding(.vertical, 9).accessibilityElement(children: .contain)
@@ -503,13 +504,13 @@ struct OrganizerView: View {
         } label: {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
-                    Image(systemName: "folder").foregroundStyle(Color.accentColor)
+                    Image(systemName: "folder").foregroundStyle(Theme.accent)
                     Text(project.title).font(.headline)
                     Spacer()
-                    Text(project.area.title).font(.caption).foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    Text(project.area.title).font(.caption).foregroundStyle(Theme.quiet)
+                    Image(systemName: "chevron.right").foregroundStyle(Theme.quiet)
                 }
-                Text(project.outcome).foregroundStyle(.secondary)
+                Text(project.outcome).foregroundStyle(Theme.quiet)
                 if let next = state.plans.first(where: { $0.id == project.nextActionID }) {
                     Label(next.text, systemImage: "arrow.right.circle").font(.callout)
                 } else if !project.archived {
@@ -522,7 +523,7 @@ struct OrganizerView: View {
     private var projectList: some View {
         VStack(alignment: .leading, spacing: 0) {
             Toggle("Показывать завершённые проекты", isOn: $showArchived)
-                .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 20).padding(.vertical, 12)
+                .toggleStyle(QuietCheckboxStyle()).padding(.horizontal, 24).padding(.vertical, 12)
             List {
                 ForEach(visibleProjects) { projectRow($0) }
             }.listStyle(.inset)
@@ -534,7 +535,7 @@ struct OrganizerView: View {
                         }
                     } else if visibleProjects.isEmpty {
                         Text("Проекты не найдены")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.quiet)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
@@ -561,21 +562,21 @@ struct OrganizerView: View {
                 Text(project.outcome).font(.body).lineLimit(4).textSelection(.enabled)
                 if !project.uncertainty.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Что нужно выяснить").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text("Что нужно выяснить").font(.caption.weight(.semibold)).foregroundStyle(Theme.quiet)
                         Text(project.uncertainty).lineLimit(4).textSelection(.enabled)
                     }
                 }
                 if let review = project.reviewDate {
                     Label("Пересмотреть \(DiaryFormat.shortDate(review))", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(.callout).foregroundStyle(Theme.quiet)
                 }
                 if !project.archived {
                     HStack {
-                        Image(systemName: "arrow.right.circle.fill").foregroundStyle(Color.accentColor)
+                        Image(systemName: "arrow.right.circle.fill").foregroundStyle(Theme.accent)
                         if let next = state.plans.first(where: { $0.id == project.nextActionID }) {
                             Text(next.text).fontWeight(.medium)
                         } else {
-                            Text("Выберите следующий шаг").foregroundStyle(.secondary)
+                            Text("Выберите следующий шаг").foregroundStyle(Theme.quiet)
                         }
                         Spacer()
                         Menu("Выбрать") {
@@ -588,7 +589,7 @@ struct OrganizerView: View {
                                 Button("Снять отметку") { state.changeOrganizer("Отметка снята") { try state.store.setNextAction(projectID: project.id, taskID: nil) } }
                             }
                         }.disabled(state.isBlocked)
-                    }.padding(12).background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                    }.padding(12).background(Theme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 HStack(spacing: 16) {
                     Toggle("Выполненные", isOn: $showCompleted).toggleStyle(QuietCheckboxStyle())
@@ -597,7 +598,7 @@ struct OrganizerView: View {
                     Button { newTask(project: project) } label: { Label("Добавить действие", systemImage: "plus") }
                         .disabled(project.archived || state.isBlocked)
                 }
-            }.padding(20)
+            }.padding(24)
             Divider()
             List { ForEach(tasks) { taskRow($0) } }.listStyle(.inset)
         }
@@ -770,7 +771,7 @@ private struct OrganizerTaskEditor: View {
                     TextField("Действие", text: $text, axis: .vertical).lineLimit(1...4)
                     if chaosItem != nil {
                         Text("Строка уйдёт из места хаоса, когда вы сохраните задачу. Отмена и ошибка оставят её на месте.")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(Theme.quiet)
                     }
                     Picker("Сфера", selection: $area) { ForEach(TaskArea.allCases) { Text($0.title).tag($0) } }
                         .disabled(projectID != nil)
@@ -781,10 +782,10 @@ private struct OrganizerTaskEditor: View {
                             Image(systemName: showAdvanced ? "chevron.down" : "chevron.right")
                                 .font(.caption.weight(.semibold)).frame(width: 12)
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("Дополнительно").foregroundStyle(.primary)
+                                Text("Дополнительно").foregroundStyle(Theme.ink)
                                 Text(advancedSummary.isEmpty ? "Проект, состояние, обещание, даты, заметка. Необязательно."
                                      : advancedSummary.joined(separator: " · "))
-                                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                    .font(.caption).foregroundStyle(Theme.quiet).lineLimit(2)
                             }
                             Spacer(minLength: 0)
                         }.frame(minHeight: 28).contentShape(Rectangle())
@@ -829,7 +830,7 @@ private struct OrganizerTaskEditor: View {
                         .accessibilityLabel("Кому обещано")
                     Toggle("Обещание под угрозой", isOn: $atRisk).toggleStyle(QuietCheckboxStyle())
                     Text("Отметка не меняет статус и даты, не отправляет уведомлений и не меняет порядок остальных дел. Она показывает дело в «Сегодня» и в пересмотре, даже если день работы не выбран.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Theme.quiet)
                 }
                 Section("Когда вернуться к задаче") {
                     OrganizerDateField(title: "День работы", enabled: $planned, date: $day)
@@ -840,7 +841,7 @@ private struct OrganizerTaskEditor: View {
                     Section("Шаги задачи") {
                         Button("Разбить на шаги") { showSteps = true }
                         Text("Откроется сохранённая версия задачи. Сначала сохраните изменения названия и подробностей, если они нужны для разбиения.")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(Theme.quiet)
                     }
                 }
                 Section("Заметка к задаче") {
@@ -852,7 +853,7 @@ private struct OrganizerTaskEditor: View {
                         .overlay(alignment: .topLeading) {
                             if details.isEmpty {
                                 Text("Подробности или что нужно выяснить")
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Theme.quiet)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 8)
                                     .allowsHitTesting(false)
@@ -903,13 +904,13 @@ private struct OrganizerTaskRemoval: View {
             HStack { Text("Снять задачу").font(.title2.weight(.semibold)); Spacer() }.padding(20)
             Form {
                 Section("Что снимаете") {
-                    Text(task.text).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(task.text).foregroundStyle(Theme.quiet).textSelection(.enabled)
                 }
                 Section("Причина") {
                     TextField("Почему дело больше не нужно", text: $reason, axis: .vertical)
                         .lineLimit(2...4).accessibilityLabel("Причина снятия")
                     Text("Без причины снятие не сохраняется. Снятие не считается выполнением, не создаёт запись в дневнике и сохраняет шаги задачи.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Theme.quiet)
                 }
             }.formStyle(.grouped)
             if let error = saveError { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled).padding(.horizontal, 20) }

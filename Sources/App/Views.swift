@@ -91,7 +91,7 @@ struct ContentView: View {
             case .organizer:
                 VStack(spacing: 0) {
                     OrganizerView(state: state)
-                    statusArea.padding(.horizontal, 20).padding(.bottom, 10)
+                    statusArea.padding(.horizontal, 24).padding(.bottom, 10)
                 }
             case .day:
                 mainColumn
@@ -100,7 +100,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     NotesView()
                     statusArea
-                        .padding(.horizontal, 28)
+                        .padding(.horizontal, 24)
                         .padding(.bottom, 14)
                 }
                 .background(Theme.canvas)
@@ -108,7 +108,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     AskView()
                     statusArea
-                        .padding(.horizontal, 28)
+                        .padding(.horizontal, 24)
                         .padding(.bottom, 14)
                 }
                 .background(Theme.canvas)
@@ -224,13 +224,13 @@ struct ContentView: View {
     private var mainColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             dayHeader
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 24)
                 .padding(.top, 18)
                 .padding(.bottom, 14)
             composer
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 24)
             statusArea
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 24)
                 .padding(.top, 10)
             feed
         }
@@ -313,8 +313,8 @@ struct ContentView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.field))
-        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.field))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
             .strokeBorder(focus == .search ? Theme.accent : Theme.rail, lineWidth: focus == .search ? 1.5 : 1))
     }
 
@@ -521,7 +521,7 @@ struct ContentView: View {
                     Button("Показать в Finder") { state.revealDataFile() }
                 }
                 .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.08)))
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.08)))
             }
             if let err = state.errorMessage {
                 HStack(spacing: 8) {
@@ -586,7 +586,7 @@ struct ContentView: View {
             // Отдельная идентичность поддерева для режима поиска и для ленты дня:
             // при переключении строки создаются заново, а не переиспользуются (дата, «К дню», порядок).
             .id(state.isSearching ? "feed-search" : "feed-day")
-            .padding(.horizontal, 22)
+            .padding(.horizontal, 24)
             .padding(.top, 12)
             .padding(.bottom, 24)
         }
@@ -696,8 +696,8 @@ struct NotesView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.field))
-        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.field))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
             .strokeBorder(searchFocused ? Theme.accent : Theme.rail, lineWidth: searchFocused ? 1.5 : 1))
     }
 
@@ -1023,7 +1023,7 @@ struct AskView: View {
                             .frame(height: 1)
                             .id("chat-bottom")
                     }
-                    .padding(.horizontal, 28)
+                    .padding(.horizontal, 24)
                     .padding(.vertical, 24)
                     .frame(maxWidth: .infinity)
                 }
@@ -1050,8 +1050,8 @@ struct AskView: View {
                         .disabled(state.chatBusy)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .strokeBorder(inputFocused ? Theme.accent : Theme.rail,
                                           lineWidth: inputFocused ? 1.5 : 1))
                         .accessibilityLabel("Вопрос по заметкам")
@@ -1075,7 +1075,7 @@ struct AskView: View {
                         .accessibilityHint(state.chatConsentGiven ? "Отправить вопрос и выбранные заметки в QwenCloud" : "Сначала разрешите передачу выбранных заметок")
                 }
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, 24)
             .padding(.top, 16)
             .padding(.bottom, 12)
             .background(Theme.pane)
@@ -1412,7 +1412,7 @@ struct EntryEditor: View {
                     .disabled(isBlank)
             }
         }
-        .padding(20)
+        .padding(24)
         .frame(width: 480)
     }
 
@@ -1446,8 +1446,8 @@ private struct PolishConfirmSheet: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
             HStack {
                 Spacer()
                 Button("Отмена", action: onCancel)
@@ -1458,7 +1458,7 @@ private struct PolishConfirmSheet: View {
                     .disabled(busy)
             }
         }
-        .padding(20)
+        .padding(24)
         .frame(width: 460)
         .interactiveDismissDisabled(busy)
     }
@@ -1497,8 +1497,8 @@ struct AIPreflightSheet: View {
                     .padding(12)
             }
             .frame(minHeight: 80, maxHeight: 280)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Текст для отправки")
             .accessibilityValue(payload)
@@ -1511,7 +1511,7 @@ struct AIPreflightSheet: View {
                     .accessibilityHint("Отправить показанный текст в QwenCloud")
             }
         }
-        .padding(20)
+        .padding(24)
         .frame(width: 500)
     }
 }
@@ -1543,8 +1543,8 @@ private struct DaySummarySheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail))
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
             }
             HStack(alignment: .firstTextBaseline) {
                 Text("Итог не записывается в дневник. Условия обработки данных определяет QwenCloud.")
@@ -1562,7 +1562,7 @@ private struct DaySummarySheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
+        .padding(24)
         .frame(width: 460)
         .interactiveDismissDisabled(busy)
     }
@@ -1616,7 +1616,7 @@ private struct APIKeySheet: View {
                     .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(20)
+        .padding(24)
         .frame(width: 460)
     }
 }

@@ -161,8 +161,8 @@ struct NoteMarkdownCodeView: View {
                     .padding(10)
             }
             .fixedSize(horizontal: false, vertical: true)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.pane))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.rail, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.pane))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail, lineWidth: 1))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
