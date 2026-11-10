@@ -19,6 +19,44 @@ struct QuietCheckboxStyle: ToggleStyle {
     }
 }
 
+/// Полоса режимов: тот же сегментированный переключатель, но сегменты одной ширины.
+/// SwiftUI `Picker` не даёт задать распределение сегментов, поэтому здесь NSSegmentedControl.
+struct ModeStrip: NSViewRepresentable {
+    @Binding var mode: AppMode
+    let items: [(title: String, mode: AppMode)]
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: items.map(\.title), trackingMode: .selectOne,
+                                         target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        control.segmentDistribution = .fillEqually
+        control.setAccessibilityLabel("Режим")
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.parent = self
+        control.selectedSegment = items.firstIndex { $0.mode == mode } ?? -1
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSSegmentedControl, context: Context) -> CGSize? {
+        let natural = nsView.intrinsicContentSize
+        return CGSize(width: proposal.width ?? natural.width, height: natural.height)
+    }
+
+    final class Coordinator: NSObject {
+        var parent: ModeStrip
+        init(_ parent: ModeStrip) { self.parent = parent }
+
+        @objc func changed(_ sender: NSSegmentedControl) {
+            let index = sender.selectedSegment
+            guard parent.items.indices.contains(index) else { return }
+            parent.mode = parent.items[index].mode
+        }
+    }
+}
+
 // MARK: - Main window
 
 struct ContentView: View {
@@ -133,14 +171,12 @@ struct ContentView: View {
     /// Режимы вынесены из тулбара: там при узком окне они уходили в меню переполнения.
     private var modeBar: some View {
         VStack(spacing: 0) {
-            Picker("Режим", selection: $state.mode) {
-                Text("Дела").tag(AppMode.organizer)
-                Text("Дневник").tag(AppMode.day)
-                Text("Заметки").tag(AppMode.notes)
-                Text("Спросить").tag(AppMode.ask)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            ModeStrip(mode: $state.mode, items: [
+                ("Дела", .organizer),
+                ("Дневник", .day),
+                ("Заметки", .notes),
+                ("Спросить", .ask),
+            ])
             .frame(width: 350)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
@@ -1282,7 +1318,7 @@ struct EntryRow: View {
             .padding(.vertical, -6)
             .buttonStyle(.borderless)
             .foregroundStyle(Theme.quiet)
-            .opacity(hovering ? 1 : 0.35)
+            .opacity(hovering ? 1 : 0.6)
         }
         .padding(.vertical, 9)
         .padding(.horizontal, inset)

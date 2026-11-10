@@ -252,13 +252,10 @@ struct OrganizerView: View {
             }.listStyle(.inset)
                 .overlay {
                     if results.isEmpty {
-                        VStack(spacing: 12) {
-                            Image(systemName: "magnifyingglass").font(.system(size: 30)).foregroundStyle(.secondary)
-                            Text("Ничего не найдено").font(.headline)
-                            Text("Поиск охватывает открытые задачи, неархивные проекты и строки места хаоса. Выполненные и снятые задачи видны только с включёнными переключателями выше.")
-                                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                                .frame(maxWidth: 380)
-                        }.padding(24)
+                        emptyNote("Ничего не найдено",
+                                  "Поиск охватывает открытые задачи, неархивные проекты и строки места хаоса. Выполненные и снятые задачи видны только с включёнными переключателями выше.") {
+                            EmptyView()
+                        }
                     }
                 }
         }
@@ -354,15 +351,25 @@ struct OrganizerView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: current.icon).font(.system(size: 30)).foregroundStyle(.secondary)
-            Text(emptyTitle).font(.headline)
-            Text(emptyDetail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
+        emptyNote(emptyTitle, emptyDetail) {
             if current == .today {
                 Button("Открыть место хаоса") { section = .inbox; focusCapture() }
             }
-        }.padding(24)
+        }
+    }
+
+    /// Пустой раздел говорит текстом слева, как пустой день в дневнике: без крупной иконки по центру.
+    private func emptyNote<Action: View>(_ title: String, _ detail: String,
+                                         @ViewBuilder action: () -> Action) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline).foregroundStyle(Theme.ink)
+            Text(detail).foregroundStyle(Theme.quiet)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 520, alignment: .leading)
+            action().padding(.top, 6)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var emptyTitle: String {
@@ -521,12 +528,10 @@ struct OrganizerView: View {
             }.listStyle(.inset)
                 .overlay {
                     if visibleProjects.isEmpty, state.projects.isEmpty {
-                        VStack(spacing: 12) {
-                            Image(systemName: "folder").font(.largeTitle).foregroundStyle(.secondary)
-                            Text("Какой результат хотите получить?").font(.headline)
-                            Text("Создайте проект и выберите одно ближайшее действие.").foregroundStyle(.secondary)
+                        emptyNote("Какой результат хотите получить?",
+                                  "Создайте проект и выберите одно ближайшее действие.") {
                             Button("Создать проект") { projectSheet = ProjectSheet(area: scope.defaultArea) }.disabled(state.isBlocked)
-                        }.padding()
+                        }
                     } else if visibleProjects.isEmpty {
                         Text("Проекты не найдены")
                             .foregroundStyle(.secondary)
