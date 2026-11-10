@@ -545,7 +545,7 @@ struct OrganizerView: View {
         } label: {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
-                    Image(systemName: "folder").foregroundStyle(Theme.accent)
+                    Image(systemName: "folder").foregroundStyle(Theme.quiet)
                     Text(project.title).font(Theme.textStrong)
                     Spacer()
                     Text(project.area.title).font(Theme.caption).foregroundStyle(Theme.quiet)
