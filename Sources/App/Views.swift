@@ -1318,7 +1318,8 @@ struct EntryRow: View {
             .padding(.vertical, -6)
             .buttonStyle(.borderless)
             .foregroundStyle(Theme.quiet)
-            .opacity(hovering ? 1 : 0.6)
+            // 0.8: не ниже 3:1 (WCAG 1.4.11) на холсте в обеих темах.
+            .opacity(hovering ? 1 : 0.8)
         }
         .padding(.vertical, 9)
         .padding(.horizontal, inset)
