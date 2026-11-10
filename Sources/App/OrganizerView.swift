@@ -25,6 +25,13 @@ private enum OrganizerArea: String, CaseIterable, Identifiable {
     var defaultArea: TaskArea { self == .work ? .work : .personal }
 }
 
+private extension View {
+    /// Цвет `signal` только у включённой отметки; без неё вид остаётся системным.
+    @ViewBuilder func signalForeground(_ on: Bool) -> some View {
+        if on { foregroundStyle(Theme.signal) } else { self }
+    }
+}
+
 private struct TaskSheet: Identifiable {
     let id = UUID()
     var task: DayPlan?
@@ -280,7 +287,7 @@ struct OrganizerView: View {
             }
             if current == .today, !urgentChaos.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Не может ждать").font(.headline)
+                    Text("Не может ждать").font(.headline).foregroundStyle(Theme.signal)
                     ForEach(urgentChaos) { chaosRow($0) }
                 }.padding(.horizontal, 20).padding(.vertical, 12)
             }
@@ -291,13 +298,15 @@ struct OrganizerView: View {
                 }
                 if current == .review {
                     ForEach(reviewGroups) { group in
-                        Section(group.title) {
+                        Section {
                             ForEach(group.items) { item in
                                 switch item {
                                 case .task(let task): taskRow(task)
                                 case .project(let project): reviewProjectRow(project)
                                 }
                             }
+                        } header: {
+                            Text(group.title).signalForeground(group.title == "Под угрозой")
                         }
                     }
                 } else if !tasks.isEmpty {
@@ -414,7 +423,7 @@ struct OrganizerView: View {
                 }
                 if task.isOpen, task.isAtRisk {
                     Label("Обещание под угрозой", systemImage: "exclamationmark.triangle")
-                        .font(.callout).foregroundStyle(Color.accentColor)
+                        .font(.callout).foregroundStyle(Theme.signal)
                 }
                 if let reason = task.removalReason {
                     Label("Причина снятия · \(reason)", systemImage: "xmark.circle")
@@ -444,7 +453,8 @@ struct OrganizerView: View {
                 }
                 if let date = task.organization?.reviewDate, !task.isCompleted {
                     Label("Пересмотреть · \(DiaryFormat.shortDate(date))", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption).foregroundStyle(isReviewDue(date) ? Color.accentColor : Color.secondary)
+                        .font(.caption.weight(isReviewDue(date) ? .medium : .regular))
+                        .foregroundStyle(isReviewDue(date) ? Theme.ink : Color.secondary)
                 }
             }.contentShape(Rectangle())
         }.padding(.vertical, 9).accessibilityElement(children: .contain)
@@ -496,7 +506,7 @@ struct OrganizerView: View {
                 if let next = state.plans.first(where: { $0.id == project.nextActionID }) {
                     Label(next.text, systemImage: "arrow.right.circle").font(.callout)
                 } else if !project.archived {
-                    Text("Определите следующий шаг").font(.callout).foregroundStyle(Color.accentColor)
+                    Text("Определите следующий шаг").font(.callout.weight(.medium)).foregroundStyle(Theme.ink)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10).contentShape(Rectangle())
         }.buttonStyle(.plain)
@@ -604,6 +614,7 @@ struct OrganizerView: View {
                         _ = try state.store.setChaosUrgent(id: item.id, !item.urgent)
                     }
                 }
+                .signalForeground(item.urgent)
                 Menu("Это задача") {
                     Button("Личное") { decideTask(item, area: .personal) }
                     Button("Работа") { decideTask(item, area: .work) }
