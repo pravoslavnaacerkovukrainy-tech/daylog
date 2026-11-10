@@ -278,12 +278,12 @@ struct ContentView: View {
     private var dayTitle: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(state.isSearching ? "Поиск" : DiaryFormat.dayMonth(state.selectedDay))
-                .font(.system(size: 28, weight: .bold))
+                .font(Theme.display)
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
             Text(state.isSearching ? "По всем дням, сначала новые" : state.daySubtitle)
-                .font(.title3)
+                .font(Theme.text)
                 .foregroundStyle(Theme.quiet)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -325,7 +325,7 @@ struct ContentView: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 TextField("Что сделано или произошло?", text: $draftText)
                     .textFieldStyle(.plain)
-                    .font(.title3)
+                    .font(Theme.input)
                     .foregroundStyle(Theme.ink)
                     .focused($focus, equals: .add)
                     .onSubmit(submit)
@@ -366,7 +366,7 @@ struct ContentView: View {
                     if customTime { timePicker }
                 }
             }
-            .font(.callout)
+            .font(Theme.text)
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
@@ -513,9 +513,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Файл данных не прочитан. Изменения отключены, чтобы его не перезаписать.")
                             .fontWeight(.semibold)
-                        Text(reason).font(.callout).foregroundStyle(Theme.quiet).textSelection(.enabled)
+                        Text(reason).font(Theme.text).foregroundStyle(Theme.quiet).textSelection(.enabled)
                         Text("Переместите или восстановите файл и перезапустите приложение.")
-                            .font(.callout).foregroundStyle(Theme.quiet)
+                            .font(Theme.text).foregroundStyle(Theme.quiet)
                     }
                     Spacer()
                     Button("Показать в Finder") { state.revealDataFile() }
@@ -530,7 +530,7 @@ struct ContentView: View {
                     Spacer()
                     Button("Скрыть") { state.errorMessage = nil }.buttonStyle(.borderless)
                 }
-                .font(.callout)
+                .font(Theme.text)
             } else if let status = state.statusMessage {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle").foregroundStyle(Theme.accent)
@@ -541,7 +541,7 @@ struct ContentView: View {
                     }
                     Spacer()
                 }
-                .font(.callout)
+                .font(Theme.text)
             }
         }
     }
@@ -594,7 +594,7 @@ struct ContentView: View {
 
     private func caption(_ s: String) -> some View {
         Text(s)
-            .font(.caption)
+            .font(Theme.caption)
             .foregroundStyle(Theme.quiet)
             .padding(.leading, 6)
             .padding(.bottom, 6)
@@ -637,7 +637,7 @@ struct NotesView: View {
         HSplitView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Заметки")
-                    .font(.headline)
+                    .font(Theme.groupTitle)
                     .foregroundStyle(Theme.ink)
                     .accessibilityAddTraits(.isHeader)
                 searchField
@@ -647,7 +647,7 @@ struct NotesView: View {
                 .disabled(state.isBlocked)
                 if notes.isEmpty {
                     Text(isSearching ? "Ничего не найдено." : "Идеи и мысли можно записать здесь — без привязки ко дню.")
-                        .font(.callout)
+                        .font(Theme.text)
                         .foregroundStyle(Theme.quiet)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
@@ -715,22 +715,22 @@ struct NoteRow: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без заголовка" : note.title)
-                    .font(.headline)
+                    .font(Theme.textStrong)
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                 if note.pinned {
                     Image(systemName: "pin.fill")
-                        .font(.caption)
+                        .font(Theme.caption)
                         .foregroundStyle(Theme.accent)
                         .accessibilityLabel("Закреплена")
                 }
             }
             Text(note.body.components(separatedBy: .newlines).first ?? "")
-                .font(.callout)
+                .font(Theme.text)
                 .foregroundStyle(Theme.quiet)
                 .lineLimit(1)
             Text(DiaryFormat.shortDate(note.updatedAt))
-                .font(.caption)
+                .font(Theme.caption)
                 .foregroundStyle(Theme.quiet)
         }
         .padding(.vertical, 5)
@@ -786,7 +786,7 @@ struct NoteEditor: View {
         VStack(alignment: .leading, spacing: 14) {
             TextField("Заголовок", text: $title)
                 .textFieldStyle(.plain)
-                .font(.system(size: 28, weight: .bold))
+                .font(Theme.display)
                 .foregroundStyle(Theme.ink)
                 .focused($focus, equals: .title)
                 .accessibilityLabel("Заголовок заметки")
@@ -794,7 +794,7 @@ struct NoteEditor: View {
 
             HStack(alignment: .center, spacing: 8) {
                 Text("Текст заметки (Markdown)")
-                    .font(.caption)
+                    .font(Theme.caption)
                     .foregroundStyle(Theme.quiet)
                     .lineLimit(1)
                     .help(Text(verbatim: "Поддерживается Markdown: # заголовки, **жирный**, *курсив*, списки, - [ ] задачи, > цитаты, ``` код, ссылки."))
@@ -813,7 +813,7 @@ struct NoteEditor: View {
             // выделение и прокрутка, и не срабатывает onDisappear/автосохранение.
             ZStack {
                 TextEditor(text: $text)
-                    .font(.body)
+                    .font(Theme.text)
                     .foregroundStyle(Theme.ink)
                     .scrollContentBackground(.hidden)
                     .padding(8)
@@ -1007,7 +1007,7 @@ struct AskView: View {
                                  ? "Сначала создайте заметки, чтобы по ним спрашивать"
                                  : (state.chatConsentGiven ? "Спросите что-нибудь о выбранных заметках…"
                                     : "Отметьте заметки внизу и разрешите передачу. До этого ничего не отправляется."))
-                                .font(.title3)
+                                .font(Theme.text)
                                 .foregroundStyle(Theme.quiet)
                                 .multilineTextAlignment(.center)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1045,6 +1045,7 @@ struct AskView: View {
                     TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...6)
+                        .font(Theme.input)
                         .foregroundStyle(Theme.ink)
                         .focused($inputFocused)
                         .disabled(state.chatBusy)
@@ -1105,7 +1106,7 @@ struct AskView: View {
         if allNotes.isEmpty {
             HStack(spacing: 12) {
                 Text("Заметок нет. Спрашивать пока не о чем, отправка выключена.")
-                    .font(.callout).foregroundStyle(Theme.quiet)
+                    .font(Theme.text).foregroundStyle(Theme.quiet)
                 Spacer()
                 Button("Создать заметку") {
                     state.mode = .notes
@@ -1117,15 +1118,15 @@ struct AskView: View {
         } else if !state.chatConsentGiven {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Передача заметок в QwenCloud")
-                    .font(.headline).foregroundStyle(Theme.ink)
+                    .font(Theme.textStrong).foregroundStyle(Theme.ink)
                     .accessibilityAddTraits(.isHeader)
                 Text("Пока вы не разрешите, заметки никуда не отправляются. Получатель: QwenCloud. Уйдут только отмеченные заметки, ваш вопрос и вопросы и ответы этой беседы. При изменении набора заметок или отмене передачи беседа начинается заново. Дневник и план не отправляются. Разрешение само ничего не отправляет.")
-                    .font(.caption).foregroundStyle(Theme.quiet)
+                    .font(Theme.caption).foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
                 noteChecklist(selection: Binding(get: { pendingSelection }, set: { pendingSelection = $0 }))
                 HStack(spacing: 12) {
                     Text(volumeText(allNotes.filter { pendingSelection.contains($0.id) }))
-                        .font(.caption).foregroundStyle(Theme.quiet)
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
                     Spacer()
                     Button("Отмена") {
                         pendingSelection = []
@@ -1144,7 +1145,7 @@ struct AskView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 10) {
                     Text("В QwenCloud уйдут: \(volumeText(state.chatNotesToSend))")
-                        .font(.caption).foregroundStyle(Theme.quiet)
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     Button { showNoteList.toggle() } label: {
@@ -1163,12 +1164,12 @@ struct AskView: View {
                 if showNoteList {
                     noteChecklist(selection: Binding(get: { state.chatSelectedNoteIDs }, set: { state.chatSelectedNoteIDs = $0 }))
                     Text("При изменении набора заметок или отмене передачи беседа начинается заново.")
-                        .font(.caption).foregroundStyle(Theme.quiet)
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if state.chatNotesToSend.isEmpty {
                     Text("Не отмечено ни одной заметки, отправка выключена.")
-                        .font(.caption).foregroundStyle(.red)
+                        .font(Theme.caption).foregroundStyle(.red)
                 }
             }
         }
@@ -1231,7 +1232,7 @@ private struct ChatBubble: View {
                                     } label: {
                                         Text(note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                              ? "Без заголовка" : note.title)
-                                            .font(.caption)
+                                            .font(Theme.caption)
                                             .lineLimit(1)
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
@@ -1283,7 +1284,7 @@ struct EntryRow: View {
                     .accessibilityLabel("в \(DiaryFormat.time(entry.timestamp))")
                 if showDate {
                     Text(DiaryFormat.shortDate(entry.timestamp))
-                        .font(.caption)
+                        .font(Theme.caption)
                         .foregroundStyle(Theme.quiet)
                 }
             }
@@ -1294,11 +1295,12 @@ struct EntryRow: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(entry.text)
+                    .font(Theme.fact)
                     .foregroundStyle(Theme.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 if let c = entry.context {
                     Text("На чём остановился: \(c)")
-                        .font(.callout)
+                        .font(Theme.fact)
                         .foregroundStyle(Theme.quiet)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1386,7 +1388,7 @@ struct EntryEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Изменить запись").font(.headline)
+            Text("Изменить запись").font(Theme.textStrong)
             Form {
                 TextField("Что сделано:", text: $text, axis: .vertical)
                     .lineLimit(1...6)
@@ -1396,12 +1398,12 @@ struct EntryEditor: View {
             }
             if entry.planID != nil {
                 Text("Запись создана выполнением задачи. Изменения останутся в дневнике, даже если вернуть задачу в работу.")
-                    .font(.callout)
+                    .font(Theme.text)
                     .foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error {
-                Text(error).foregroundStyle(.red).font(.callout)
+                Text(error).foregroundStyle(.red).font(Theme.text)
             }
             HStack {
                 Spacer()
@@ -1434,14 +1436,14 @@ private struct PolishConfirmSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Причесать черновик")
-                .font(.title2.bold())
+                .font(Theme.title)
                 .foregroundStyle(Theme.ink)
             Text("В QwenCloud отправляется только текст этого черновика; записи дневника и задачи не отправляются. Условия обработки данных определяет QwenCloud. В дневник текст попадёт только после «Записать».")
-                .font(.callout)
+                .font(Theme.text)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)
             Text(draft)
-                .font(.title3)
+                .font(Theme.input)
                 .foregroundStyle(Theme.ink)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1476,18 +1478,18 @@ struct AIPreflightSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
-                .font(.title2.bold())
+                .font(Theme.title)
                 .foregroundStyle(Theme.ink)
                 .accessibilityAddTraits(.isHeader)
             Text("Получатель: QwenCloud")
-                .font(.headline)
+                .font(Theme.textStrong)
                 .foregroundStyle(Theme.ink)
             Text(explanation)
-                .font(.callout)
+                .font(Theme.text)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Будет отправлено (\(payload.count) знаков):")
-                .font(.caption)
+                .font(Theme.caption)
                 .foregroundStyle(Theme.quiet)
             ScrollView {
                 Text(payload)
@@ -1525,7 +1527,7 @@ private struct DaySummarySheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Итог за \(DiaryFormat.shortDate(day))")
-                .font(.title2.bold())
+                .font(Theme.title)
                 .foregroundStyle(Theme.ink)
             if busy {
                 HStack(spacing: 10) {
@@ -1537,7 +1539,7 @@ private struct DaySummarySheet: View {
                 .accessibilityLabel("Подвожу итог дня")
             } else if let summary {
                 Text(summary)
-                    .font(.body)
+                    .font(Theme.text)
                     .foregroundStyle(Theme.ink)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1548,7 +1550,7 @@ private struct DaySummarySheet: View {
             }
             HStack(alignment: .firstTextBaseline) {
                 Text("Итог не записывается в дневник. Условия обработки данных определяет QwenCloud.")
-                    .font(.caption)
+                    .font(Theme.caption)
                     .foregroundStyle(Theme.quiet)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 12)
@@ -1580,15 +1582,15 @@ private struct APIKeySheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Ключ QwenCloud")
-                .font(.title2.bold())
+                .font(Theme.title)
                 .foregroundStyle(Theme.ink)
             Text("Ключ хранится в Связке ключей этого Mac и не записывается в файл дневника. Если в Связке ключей его нет, приложение берёт QWENCLOUD_API_KEY из окружения запуска.")
-                .font(.callout)
+                .font(Theme.text)
                 .foregroundStyle(Theme.quiet)
                 .fixedSize(horizontal: false, vertical: true)
             if hasSavedKey {
                 Text("Ключ уже сохранён. Новый заменит его.")
-                    .font(.callout)
+                    .font(Theme.text)
                     .foregroundStyle(Theme.quiet)
             }
             SecureField("Ключ QwenCloud", text: $key)
@@ -1599,10 +1601,10 @@ private struct APIKeySheet: View {
                 }
             }
             Text("Выберите регион, где создан ключ в QwenCloud. Модель: Qwen3.8-Flash. Нужен обычный API Key, не ключ Token Plan.")
-                .font(.caption)
+                .font(Theme.caption)
                 .foregroundStyle(Theme.quiet)
             if let error {
-                Text(error).font(.callout).foregroundStyle(.red)
+                Text(error).font(Theme.text).foregroundStyle(.red)
             }
             HStack {
                 if hasSavedKey {

@@ -11,7 +11,7 @@ struct NoteMarkdownView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if blocks.isEmpty {
                     Text("Пока нечего показать — текст заметки пуст.")
-                        .font(.callout)
+                        .font(Theme.text)
                         .foregroundStyle(Theme.quiet)
                 } else {
                     ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
@@ -50,7 +50,7 @@ struct NoteMarkdownBlockView: View {
 
         case let .paragraph(text):
             Text(NoteMarkdown.inline(text))
-                .font(.body)
+                .font(Theme.fact)
                 .foregroundStyle(Theme.ink)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -97,11 +97,10 @@ struct NoteMarkdownBlockView: View {
 
     static func headingFont(_ level: Int) -> Font {
         switch level {
-        case 1: return .system(size: 22, weight: .bold)
-        case 2: return .system(size: 19, weight: .semibold)
-        case 3: return .system(size: 16, weight: .semibold)
-        case 4: return .headline
-        default: return .subheadline.weight(.semibold)
+        case 1: return Theme.title
+        case 2: return Theme.groupTitle
+        case 3: return .system(size: 15, weight: .semibold)
+        default: return Theme.textStrong
         }
     }
 }
@@ -123,7 +122,7 @@ struct NoteMarkdownListRow: View {
                     .accessibilityLabel(done ? "Выполнено" : "Не выполнено")
             }
             Text(NoteMarkdown.inline(item.text))
-                .font(.body)
+                .font(Theme.fact)
                 .foregroundStyle(item.task == true ? Theme.quiet : Theme.ink)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -150,12 +149,12 @@ struct NoteMarkdownCodeView: View {
         VStack(alignment: .leading, spacing: 4) {
             if let label, !label.isEmpty {
                 Text(verbatim: label)
-                    .font(.caption)
+                    .font(Theme.caption)
                     .foregroundStyle(Theme.quiet)
             }
             ScrollView(.horizontal) {
                 Text(verbatim: code.isEmpty ? " " : code)
-                    .font(.system(.callout, design: .monospaced))
+                    .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(Theme.ink)
                     .fixedSize(horizontal: true, vertical: true)
                     .padding(10)

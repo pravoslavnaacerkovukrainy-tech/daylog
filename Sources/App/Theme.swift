@@ -31,6 +31,27 @@ enum Theme {
                 alpha: 1)
     }
 
+    // MARK: Шкала размеров (базовый 13 pt, только системные шрифты)
+
+    /// 11: подпись.
+    static let caption = Font.system(size: 11)
+    /// 13: текст.
+    static let text = Font.system(size: 13)
+    /// 13 semibold: заголовок строки списка.
+    static let textStrong = Font.system(size: 13, weight: .semibold)
+    /// 13 medium: значение мета-строки.
+    static let textMedium = Font.system(size: 13, weight: .medium)
+    /// 15: поле ввода дневника и вопрос чата.
+    static let input = Font.system(size: 15)
+    /// 17: заголовок группы.
+    static let groupTitle = Font.system(size: 17, weight: .semibold)
+    /// 22: заголовок раздела «Дел» и листа.
+    static let title = Font.system(size: 22, weight: .semibold)
+    /// 28: дата дня и заголовок заметки.
+    static let display = Font.system(size: 28, weight: .semibold)
+    /// Serif (New York) для фактов: «то, что произошло». Кириллица покрыта.
+    static let fact = Font.system(size: 13, design: .serif)
+
     /// Время: главный визуальный ориентир. SF Rounded, полужирный, цифры одной ширины.
     static let timeFont = Font.system(.body, design: .rounded).weight(.semibold).monospacedDigit()
 }

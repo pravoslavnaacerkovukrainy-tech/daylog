@@ -17,23 +17,23 @@ struct TaskBreakdownView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Разбить на шаги").font(.title2.weight(.semibold))
+                Text("Разбить на шаги").font(Theme.title)
                 Spacer()
                 Button("Закрыть") { draft.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
             }.padding(24)
             if draft.hasSavedEdits {
                 HStack(spacing: 12) {
                     Text("Правки и отметки выполнения ещё не сохранены.")
-                        .font(.caption).foregroundStyle(Theme.quiet)
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
                     Spacer()
                     Button("Сохранить шаги", action: saveSteps).disabled(locked)
                 }.padding(.horizontal, 24).padding(.bottom, 12)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text(draft.currentContext.title).font(.headline).textSelection(.enabled)
+                    Text(draft.currentContext.title).font(Theme.groupTitle).textSelection(.enabled)
                     Text("Шаги относятся к этой задаче. Их выполнение не завершает задачу и не создаёт записи дневника. Результат подтверждаете вы.")
-                        .font(.callout).foregroundStyle(Theme.quiet)
+                        .font(Theme.text).foregroundStyle(Theme.quiet)
                     if draft.observedParent.isCompleted {
                         Text("Задача выполнена. Для изменения шагов сначала верните её в работу.").foregroundStyle(Theme.quiet)
                     }
@@ -81,7 +81,7 @@ struct TaskBreakdownView: View {
                 Text("Текущее название: \(draft.currentContext.title)")
                 Text("Текущие подробности: \(draft.currentContext.details.isEmpty ? "не указаны" : draft.currentContext.details)")
                 Text("Старые шаги, вопросы и уточнения сохранены ниже для сверки. Добавление и новые запросы заблокированы до вашего решения.")
-                    .font(.callout).foregroundStyle(Theme.quiet)
+                    .font(Theme.text).foregroundStyle(Theme.quiet)
                 Button("Я пересмотрел черновик для текущей задачи") { confirmReview = true }.disabled(locked)
                 Button("Удалить прежний черновик и начать новый") { confirmDiscardContext = true }.disabled(locked)
             }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
@@ -90,7 +90,7 @@ struct TaskBreakdownView: View {
 
     private var savedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Сохранённые шаги").font(.headline)
+            Text("Сохранённые шаги").font(Theme.groupTitle)
             if draft.savedSteps.isEmpty { Text("Пока нет. Можно ввести вручную ниже или попросить QwenCloud.").foregroundStyle(Theme.quiet) }
             stepRows(.saved, completion: true)
             HStack {
@@ -100,15 +100,15 @@ struct TaskBreakdownView: View {
                 Button("Загрузить заново") { confirmReload = true }.disabled(draft.busy || current == nil)
             }
             Text("Текст, порядок, удаление и отметки выполнения применятся только после сохранения правок. Несохранённые правки не восстанавливаются после выхода из приложения.")
-                .font(.caption).foregroundStyle(Theme.quiet)
+                .font(Theme.caption).foregroundStyle(Theme.quiet)
         }
     }
 
     private var aiSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("QwenCloud по вашему запросу").font(.headline)
+            Text("QwenCloud по вашему запросу").font(Theme.groupTitle)
             Text("Будут отправлены только показанные ниже название, подробности и ваши явные уточнения. Другие задачи, дневник, заметки и сохранённые шаги не отправляются.")
-                .font(.callout).foregroundStyle(Theme.quiet)
+                .font(Theme.text).foregroundStyle(Theme.quiet)
             GroupBox("Название и подробности для отправки") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(draft.input.title)
@@ -119,7 +119,7 @@ struct TaskBreakdownView: View {
             TextField("Необязательно: нужный результат, ограничения, ресурсы или просьба изменить вариант", text: $draft.clarifications, axis: .vertical)
                 .lineLimit(3...6).textFieldStyle(.roundedBorder).disabled(locked || draft.isContextStale)
             ForEach(draft.questions, id: \.self) { question in
-                Text(question).font(.callout)
+                Text(question).font(Theme.text)
                 TextField("Ваш ответ или что пока неизвестно", text: draft.answerBinding(question: question), axis: .vertical)
                     .lineLimit(1...4).textFieldStyle(.roundedBorder).disabled(locked || draft.isContextStale)
             }
@@ -138,18 +138,18 @@ struct TaskBreakdownView: View {
                     Button(draft.proposal.isEmpty ? "Предложить шаги" : "Запросить новый вариант") {
                         if draft.proposal.isEmpty { draft.generate() } else { confirmRegenerate = true }
                     }.disabled(locked || draft.isContextStale || !canRequest)
-                    Text("Без автоматических повторов").font(.caption).foregroundStyle(Theme.quiet)
+                    Text("Без автоматических повторов").font(Theme.caption).foregroundStyle(Theme.quiet)
                 }
             }
-            if !canRequest { Text(TaskBreakdownError.contextTooLarge.localizedDescription).font(.callout).foregroundStyle(.red) }
-            Text("Черновики сохраняются при закрытии окна до выхода из приложения.").font(.caption).foregroundStyle(Theme.quiet)
+            if !canRequest { Text(TaskBreakdownError.contextTooLarge.localizedDescription).font(Theme.text).foregroundStyle(.red) }
+            Text("Черновики сохраняются при закрытии окна до выхода из приложения.").font(Theme.caption).foregroundStyle(Theme.quiet)
         }
     }
 
     @ViewBuilder private var proposalSection: some View {
         if !draft.proposal.isEmpty {
             Divider()
-            Text("Предложение, ещё не сохранено").font(.headline)
+            Text("Предложение, ещё не сохранено").font(Theme.groupTitle)
             stepRows(.proposal, completion: false)
             HStack {
                 Button("Ещё шаг") { draft.proposal.append(TaskStep(text: "")) }.disabled(locked)
@@ -158,7 +158,7 @@ struct TaskBreakdownView: View {
                 Button("Добавить шаги", action: appendSteps).buttonStyle(.borderedProminent)
                     .disabled(locked || draft.isContextStale || draft.hasSavedEdits)
             }
-            if draft.hasSavedEdits { Text("Сначала сохраните правки существующих шагов.").font(.caption).foregroundStyle(Theme.quiet) }
+            if draft.hasSavedEdits { Text("Сначала сохраните правки существующих шагов.").font(Theme.caption).foregroundStyle(Theme.quiet) }
         }
     }
 
@@ -174,7 +174,7 @@ struct TaskBreakdownView: View {
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     if completion, !step.isCompleted, draft.savedSteps.first(where: { !$0.isCompleted })?.id == step.id {
-                        Text("Следующий шаг").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+                        Text("Следующий шаг").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
                     }
                     TextField("Шаг \(index + 1)", text: draft.stepTextBinding(id: step.id, in: list), axis: .vertical)
                         .lineLimit(1...5).textFieldStyle(.roundedBorder)
