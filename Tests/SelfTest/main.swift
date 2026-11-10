@@ -2183,6 +2183,26 @@ test("P1-02: команда быстрой записи хаоса только 
     }
 }
 
+test("P1-03: поиск по ⌘F остаётся в текущем разделе, запись открывает дневник") {
+    MainActor.assumeIsolated {
+        let state = AppState(store: DiaryStore(directory: freshDir("p1-find")), ai: AISpy().services)
+        for mode in [AppMode.organizer, .notes, .day] {
+            state.mode = mode
+            let token = state.focusToken
+            state.requestFocus(.search)
+            check(state.mode == mode && state.focusRequest == .search && state.focusToken == token + 1,
+                  "поиск в режиме \(mode) не меняет режим и выдаёт запрос фокуса")
+        }
+        state.mode = .ask
+        let askToken = state.focusToken
+        state.requestFocus(.search)
+        check(state.mode == .ask && state.focusToken == askToken, "в «Спросить» поля поиска нет, запрос игнорируется")
+        state.mode = .organizer
+        state.requestFocus(.add)
+        check(state.mode == .day && state.focusRequest == .add, "запрос записи по-прежнему открывает дневник")
+    }
+}
+
 test("P1-05: «Оформить» и итог дня молчат до «Отправить»") {
     try MainActor.assumeIsolated {
         let spy = AISpy()

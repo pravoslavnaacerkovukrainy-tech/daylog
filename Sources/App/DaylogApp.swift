@@ -110,8 +110,9 @@ struct DaylogCommands: Commands {
             Button("Следующий день") { state.goNext() }
                 .keyboardShortcut("]")
             Divider()
-            Button("Найти по всем дням") { state.requestFocus(.search) }
+            Button("Найти") { state.requestFocus(.search) }
                 .keyboardShortcut("f")
+                .disabled(state.mode == .ask)
             Divider()
             Button("Спросить ИИ") {
                 state.mode = .ask

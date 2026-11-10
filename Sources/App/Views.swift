@@ -126,8 +126,9 @@ struct ContentView: View {
             DispatchQueue.main.async { focus = .add }
         }
         .onChange(of: state.focusToken) { _, _ in
-            state.mode = .day
-            focus = state.focusRequest
+            // Режим меняет только запрос на запись (AppState.requestFocus). Поиск остаётся в своём разделе:
+            // «Дела» и «Заметки» ловят тот же счётчик у себя.
+            if state.mode == .day { focus = state.focusRequest }
         }
         .onChange(of: customTime) { _, on in
             if on { draftTime = defaultCustomTime() }
@@ -669,6 +670,9 @@ struct NotesView: View {
             NoteEditor(state: state, note: selectedNote)
                 .id(state.selectedNoteID?.uuidString ?? newNoteToken.uuidString)
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onChange(of: state.focusToken) { _, _ in
+            if state.focusRequest == .search { searchFocused = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .daylogNewNote)) { notification in
             guard let source = notification.object as? AppState, source === state else { return }

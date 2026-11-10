@@ -55,6 +55,7 @@ struct OrganizerView: View {
     /// Новый профиль открывает место хаоса; выбранный человеком раздел восстанавливается.
     @State private var section: OrganizerSection?
     @FocusState private var captureFocused: Bool
+    @FocusState private var searchFocused: Bool
     @State private var scope: OrganizerArea = .all
     @State private var query = ""
     @State private var taskSheet: TaskSheet?
@@ -162,6 +163,9 @@ struct OrganizerView: View {
             if requested { handleTaskCreationRequest() }
         }
         .onChange(of: state.chaosCaptureToken) { _, _ in handleChaosCaptureRequest() }
+        .onChange(of: state.focusToken) { _, _ in
+            if state.focusRequest == .search { searchFocused = true }
+        }
         .sheet(item: $taskSheet) { sheet in
             OrganizerTaskEditor(state: state, task: sheet.task, projectID: sheet.projectID,
                                 area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay,
@@ -212,6 +216,7 @@ struct OrganizerView: View {
             HStack {
                 TextField("Найти задачу, проект или строку", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .focused($searchFocused)
                     .accessibilityLabel("Поиск по делам")
                 if current == .projects {
                     Button { projectSheet = ProjectSheet(area: scope.defaultArea) } label: {

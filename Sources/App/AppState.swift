@@ -242,7 +242,13 @@ final class AppState: ObservableObject {
         go(to: Calendar.current.date(byAdding: .day, value: 1, to: selectedDay) ?? selectedDay)
     }
 
+    /// `.add` открывает дневник и ставит фокус в поле записи. `.search` ищет в текущем разделе
+    /// и режим не меняет; в «Спросить» поля поиска нет, запрос игнорируется.
     func requestFocus(_ target: FocusTarget) {
+        switch target {
+        case .add: mode = .day
+        case .search: if mode == .ask { return }
+        }
         focusRequest = target
         focusToken += 1
     }
