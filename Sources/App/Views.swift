@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Theme (токены — см. DESIGN.md)
+// MARK: - Controls (токены темы в Theme.swift)
 
 /// Флажок с заметной рамкой: системный на macOS 27 почти сливается с фоном.
 struct QuietCheckboxStyle: ToggleStyle {
@@ -17,31 +17,6 @@ struct QuietCheckboxStyle: ToggleStyle {
         .buttonStyle(.plain)
         .accessibilityValue(configuration.isOn ? "включено" : "выключено")
     }
-}
-
-enum Theme {
-    /// Лист ленты дня.
-    static let canvas = Color(nsColor: .textBackgroundColor)
-    /// Панели и хром.
-    static let pane = Color(nsColor: .windowBackgroundColor)
-    static let ink = dynamic(0x263747, dark: .labelColor)
-    static let quiet = dynamic(0x657586, dark: .secondaryLabelColor)
-    static let accent = dynamic(0x2F6690, dark: NSColor(srgbRed: 0.525, green: 0.714, blue: 0.878, alpha: 1))
-    static let rail = dynamic(0xDCE5EC, dark: .separatorColor)
-    static let field = dynamic(0xF5F8FA, dark: .controlBackgroundColor)
-
-    static func dynamic(_ hex: UInt32, dark: NSColor) -> Color {
-        let light = NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
-                            green: CGFloat((hex >> 8) & 0xFF) / 255,
-                            blue: CGFloat(hex & 0xFF) / 255,
-                            alpha: 1)
-        return Color(nsColor: NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-        })
-    }
-
-    /// Время — главный визуальный ориентир: SF Rounded, полужирный, цифры одной ширины.
-    static let timeFont = Font.system(.body, design: .rounded).weight(.semibold).monospacedDigit()
 }
 
 // MARK: - Main window
