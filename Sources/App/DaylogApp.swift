@@ -56,11 +56,6 @@ struct DaylogCommands: Commands {
                 .keyboardShortcut("2")
             Button("Заметки") { show(.notes) }
                 .keyboardShortcut("3")
-            Button("Спросить") {
-                show(.ask)
-                NotificationCenter.default.post(name: .daylogAskFocus, object: state)
-            }
-                .keyboardShortcut("4")
             Divider()
         }
         CommandGroup(replacing: .newItem) {
@@ -112,26 +107,6 @@ struct DaylogCommands: Commands {
             Divider()
             Button("Найти") { state.requestFocus(.search) }
                 .keyboardShortcut("f")
-                .disabled(state.mode == .ask)
-            Divider()
-            Button("Спросить ИИ") {
-                state.mode = .ask
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "main")
-                NotificationCenter.default.post(name: .daylogAskFocus, object: state)
-            }
-            Button("Итог дня…") {
-                state.mode = .day
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "main")
-                state.summarizeDay()
-            }
-                .keyboardShortcut("i", modifiers: [.command, .option])
-                .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
-            Divider()
-            Button("Причесать черновик") { state.requestPolish() }
-                .keyboardShortcut(.return, modifiers: [.command, .option])
-            Button("Ключ QwenCloud…") { state.keySheetIntent = .settings }
         }
     }
 }

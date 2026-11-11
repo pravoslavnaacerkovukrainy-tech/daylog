@@ -23,7 +23,7 @@ public enum TaskStepsError: Error, LocalizedError, Equatable {
         switch self {
         case .invalidList: return "Нужны непустые шаги до 500 знаков, не более 100 шагов, без повторов."
         case .parentHasSteps: return "У задачи есть шаги. Сначала явно удалите их в редакторе шагов и сохраните список. Для выполненной или снятой задачи сначала верните её в работу."
-        case .changedParent: return "Задача или её шаги изменились. Черновик сохранён. Нажмите «Загрузить заново» и проверьте предложение перед добавлением."
+        case .changedParent: return "Задача или её шаги изменились. Черновик сохранён. Нажмите «Загрузить заново» и проверьте шаги перед сохранением."
         }
     }
 }
@@ -35,7 +35,7 @@ public extension DayPlan {
 
 public extension DiaryStore {
     /// Весь список сохраняется одним persist. Ожидается полный снимок родителя,
-    /// чтобы ответ ИИ не применялся к уже изменённому заданию.
+    /// чтобы правки не применились к уже изменённой задаче.
     @discardableResult
     func replaceTaskSteps(parent: DayPlan, steps: [TaskStep], now: Date = Date()) throws -> DayPlan {
         guard let index = plans.firstIndex(where: { $0.id == parent.id }) else { throw DiaryError.notFound }
