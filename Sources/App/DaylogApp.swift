@@ -129,7 +129,7 @@ struct DaylogCommands: Commands {
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             Divider()
-            Button("Причесать черновик") { state.requestPolish() }
+            Button("Улучшить текст записи") { state.requestPolish() }
                 .keyboardShortcut(.return, modifiers: [.command, .option])
             Button("Ключ Groq…") { state.keySheetIntent = .settings }
         }

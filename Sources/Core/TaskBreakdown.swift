@@ -72,7 +72,7 @@ public enum TaskBreakdown {
             ["role": "user", "content": String(decoding: user, as: UTF8.self)],
         ]
         do {
-            return try GroqChat.requestBody(messages: messages, jsonObject: true)
+            return try GroqChat.requestBody(messages: messages, output: .jsonObject)
         } catch DraftPolishError.requestTooLarge {
             throw TaskBreakdownError.contextTooLarge
         }

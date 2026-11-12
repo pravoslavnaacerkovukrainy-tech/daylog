@@ -25,7 +25,13 @@ public enum GroqChat {
         return URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }()
 
-    static func requestBody(messages: [[String: Any]], jsonObject: Bool = false) throws -> Data {
+    enum Output {
+        case text
+        case jsonObject
+        case browserSearch
+    }
+
+    static func requestBody(messages: [[String: Any]], output: Output = .text) throws -> Data {
         var payload: [String: Any] = [
             "model": model,
             "reasoning_effort": "low",
@@ -35,7 +41,16 @@ public enum GroqChat {
             "stream": false,
             "messages": messages,
         ]
-        if jsonObject { payload["response_format"] = ["type": "json_object"] }
+        switch output {
+        case .text:
+            break
+        case .jsonObject:
+            payload["response_format"] = ["type": "json_object"]
+        case .browserSearch:
+            payload["tools"] = [["type": "browser_search"]]
+            payload["tool_choice"] = "required"
+            payload["citation_options"] = "enabled"
+        }
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         guard data.count <= maxRequestBytes else { throw DraftPolishError.requestTooLarge }
         return data
@@ -52,7 +67,7 @@ public enum GroqChat {
         return request
     }
 
-    static func send(_ request: URLRequest, using session: URLSession) async throws -> Data {
+    static func send(_ request: URLRequest, using session: URLSession, maxBytes: Int = maxResponseBytes) async throws -> Data {
         try Task.checkCancellation()
         let data: Data
         let response: URLResponse
@@ -65,7 +80,7 @@ public enum GroqChat {
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else { throw DraftPolishError.badResponse }
         guard (200...299).contains(http.statusCode) else { throw DraftPolishError.http(http.statusCode) }
-        guard data.count <= maxResponseBytes else { throw DraftPolishError.responseTooLarge }
+        guard data.count <= maxBytes else { throw DraftPolishError.responseTooLarge }
         return data
     }
 
@@ -73,6 +88,13 @@ public enum GroqChat {
         try extractText(data) { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
     static func extractText(_ data: Data, cleanOutput: (String) -> String) throws -> String {
+        let message = try responseMessage(data)
+        let text = cleanOutput(message["content"] as? String ?? "")
+        guard !text.isEmpty else { throw DraftPolishError.badResponse }
+        return text
+    }
+
+    static func responseMessage(_ data: Data) throws -> [String: Any] {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]], choices.count == 1,
               let choice = choices.first,
@@ -82,13 +104,11 @@ public enum GroqChat {
         if choice["finish_reason"] as? String == "length" {
             throw DraftPolishError.truncatedResponse
         }
-        // В результат попадает только обычный текст ответа, без вызовов инструментов.
-        guard message["tool_calls"] == nil, let content = message["content"] as? String else {
+        // Встроенный поиск исполняет Groq. Клиент не выполняет вызовы инструментов.
+        if let calls = message["tool_calls"], !(calls is NSNull), (calls as? [Any])?.isEmpty != true {
             throw DraftPolishError.badResponse
         }
-        let text = cleanOutput(content)
-        guard !text.isEmpty else { throw DraftPolishError.badResponse }
-        return text
+        return message
     }
     public static func stripCodeFence(_ s: String) -> String {
         var s = s.trimmingCharacters(in: .whitespacesAndNewlines)

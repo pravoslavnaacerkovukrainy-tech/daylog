@@ -1,6 +1,6 @@
 import Foundation
 
-/// Причёсывание одного черновика через Groq Chat Completions API.
+/// Редактура одного черновика через Groq Chat Completions API.
 /// В запрос попадает только переданный текст. Дневник и план сюда не передаются.
 public enum DraftPolish {
     public static let model = GroqChat.model
@@ -8,10 +8,10 @@ public enum DraftPolish {
     public static let maxCharacters = 2_000
 
     public static let systemPrompt = """
-    Ты правишь черновик одной записи личного дневника. \
-    Верни одну короткую фразу на языке черновика. \
-    Сохрани факты, имена и числа. Ничего не добавляй и не оценивай. \
-    Без кавычек, списков и пояснений.
+    Перепиши черновик одной записи личного дневника яснее и естественнее на языке автора.
+    Исправь опечатки, убери повторы и выстрой понятный порядок мыслей.
+    Сохрани голос автора, имена, числа и все существенные факты. Не превращай планы и сомнения в свершившиеся факты.
+    Ничего не добавляй от себя. Верни только готовую запись одним абзацем, без списков и пояснений.
     """
 
     /// Обычный запрос Chat Completions; условия обработки определяет Groq.
@@ -38,7 +38,7 @@ public enum DraftPolish {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Одна фраза для поля ввода: без ограды кода, внешней кавычки и подписи «Запись:».
+    /// Один абзац для поля ввода: без ограды кода, внешней кавычки и подписи «Запись:».
     public static func cleanOutput(_ raw: String) -> String {
         let s = stripOnePair(GroqChat.stripCodeFence(raw))
         let lines = s.split(whereSeparator: \.isNewline)
@@ -48,7 +48,8 @@ public enum DraftPolish {
         for prefix in ["Запись:", "Черновик:", "Фраза:"] where line.hasPrefix(prefix) {
             line = String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
         }
-        return stripOnePair(line)
+        let continuation = lines.dropFirst().prefix { !$0.hasPrefix("Пояснение:") }
+        return stripOnePair(([line] + continuation).joined(separator: " "))
     }
 
     private static func stripOnePair(_ s: String) -> String {
@@ -76,7 +77,7 @@ public enum DraftPolishError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .empty:
-            return "Нечего причёсывать: поле записи пустое."
+            return "Введите текст записи."
         case .tooLong(let count, let limit):
             return "Черновик слишком длинный для одного запроса (\(count) знаков, лимит \(limit))."
         case .contextTooLarge(let count):

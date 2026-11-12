@@ -22,7 +22,7 @@ public enum NotePolish {
         return try GroqChat.requestBody(messages: [
             ["role": "system", "content": systemPrompt],
             ["role": "user", "content": text],
-        ], jsonObject: true)
+        ], output: .jsonObject)
     }
 
     public static func request(draft: String, apiKey: String) throws -> URLRequest {

@@ -35,7 +35,7 @@ enum UndoAction: Equatable {
 struct AIServices {
     var polishNote: (_ draft: String) async throws -> (title: String, body: String)
     var summarizeDay: (_ entries: [DiaryEntry]) async throws -> String
-    var askNotes: (_ notes: [DiaryNote], _ history: [ChatMessage], _ question: String) async throws -> (answer: String, sources: [Int])
+    var ask: (ChatPreflight) async throws -> ChatReply
 
     static let live = AIServices(
         polishNote: { draft in
@@ -46,24 +46,33 @@ struct AIServices {
             guard let key = GroqKeyStore.resolve() else { throw DraftPolishError.noKey }
             return try await DaySummaryClient().summarize(entries: entries, apiKey: key)
         },
-        askNotes: { notes, history, question in
+        ask: { request in
             guard let key = GroqKeyStore.resolve() else { throw DraftPolishError.noKey }
-            return try await NotesChatClient().ask(notes: notes, history: history, question: question, apiKey: key)
+            return try await NotesChatClient().ask(notes: request.notes, history: request.history,
+                                                  question: request.question, apiKey: key, searchWeb: request.searchWeb)
         }
     )
 }
 
-struct ChatPreflight {
+enum ChatNoteScope: String, CaseIterable {
+    case automatic = "Подбирать автоматически"
+    case selected = "Выбрать вручную"
+    case none = "Без заметок"
+}
+
+struct ChatPreflight: Equatable {
     let notes: [DiaryNote]
     let history: [ChatMessage]
     let question: String
+    let searchWeb: Bool
 
     var payload: String {
         let conversation = history.map { message in
             let label = message.role == .user ? "Вопрос" : "Ответ Groq"
             return "\(label): \(message.text)"
         }
-        return (["Заметки:\n" + NotesChat.numberedNotes(notes)] + conversation + ["Новый вопрос: " + question])
+        let context = notes.isEmpty ? [] : ["Заметки:\n" + NotesChat.numberedNotes(notes)]
+        return (context + conversation + ["Новый вопрос: " + question])
             .joined(separator: "\n\n")
     }
 }
@@ -105,9 +114,13 @@ final class AppState: ObservableObject {
     @Published private(set) var savedOrganizerSection: String?
     @Published var mode: AppMode = .organizer
     @Published var taskCreationRequested = false
-    @Published var chatMessages: [ChatMessage] = []
-    @Published private(set) var chatBusy: Bool = false
+    @Published var chatDraft = ""
+    @Published private(set) var chatMessages: [ChatMessage] = []
+    @Published private(set) var chatPendingQuestion: ChatMessage?
     @Published private(set) var chatPreflight: ChatPreflight?
+    @Published var chatNoteScope: ChatNoteScope = .automatic { didSet { invalidateChatRequest(if: oldValue != chatNoteScope) } }
+    @Published var chatSearchWeb = false { didSet { invalidateChatRequest(if: oldValue != chatSearchWeb) } }
+    @Published var chatSelectedNoteIDs: Set<UUID> = [] { didSet { invalidateChatRequest(if: oldValue != chatSelectedNoteIDs) } }
     private var chatTask: Task<Void, Never>?
     /// Одноразовый итог текущего дня (приложение не сохраняет; живёт, пока открыт sheet).
     @Published private(set) var daySummary: String?
@@ -117,14 +130,6 @@ final class AppState: ObservableObject {
     private var summaryTask: Task<Void, Never>?
     /// Показанный набросок заметки перед «Оформить». Сеть только после confirmNotePolish().
     @Published private(set) var notePolishPreflight: NotePolishPreflight?
-    /// Явное согласие передавать выбранные заметки в Groq. Живёт до выхода из приложения.
-    @Published private(set) var chatConsentGiven = false
-    /// Заметки, которые человек оставил отмеченными для чата. Новый набор начинает новую беседу.
-    @Published var chatSelectedNoteIDs: Set<UUID> = [] {
-        didSet {
-            if oldValue != chatSelectedNoteIDs { clearChat() }
-        }
-    }
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
@@ -275,7 +280,7 @@ final class AppState: ObservableObject {
         taskCreationRequested = true
     }
 
-    /// Меню «Причесать черновик». Само поле ввода живёт в окне и слушает этот счётчик.
+    /// Команда «Улучшить текст записи» передаётся открытому редактору дневника.
     @Published private(set) var polishRequestToken = 0
     enum KeySheetIntent: Equatable { case settings, polish }
     @Published var keySheetIntent: KeySheetIntent?
@@ -469,91 +474,120 @@ final class AppState: ObservableObject {
 
     // MARK: Notes chat
 
-    /// Заметки, которые уйдут с вопросом: только отмеченные и только после согласия.
-    var chatNotesToSend: [DiaryNote] {
-        _ = notes
-        guard chatConsentGiven else { return [] }
-        return store.sortedNotes().filter { chatSelectedNoteIDs.contains($0.id) }
+    var chatBusy: Bool { chatPendingQuestion != nil }
+    var canSendChat: Bool { !chatBusy && !isBlocked }
+
+    private func makeChatPreflight(_ question: String) throws -> ChatPreflight {
+        let notes: [DiaryNote]
+        switch chatNoteScope {
+        case .automatic:
+            notes = NotesChat.relevantNotes(in: sortedNotes, question: question, history: chatMessages)
+        case .selected:
+            notes = sortedNotes.filter { chatSelectedNoteIDs.contains($0.id) }
+        case .none:
+            notes = []
+        }
+        var history = NotesChat.recentHistory(chatMessages)
+        while true {
+            do {
+                _ = try NotesChat.requestBody(notes: notes, history: history, question: question, searchWeb: chatSearchWeb)
+                return ChatPreflight(notes: notes, history: history, question: question, searchWeb: chatSearchWeb)
+            } catch DraftPolishError.requestTooLarge where !history.isEmpty {
+                history.removeFirst(min(2, history.count))
+            }
+        }
     }
-
-    /// Объём контекста заметок в знаках, как он уйдёт в запрос.
-    var chatContextCharacters: Int { NotesChat.numberedNotes(chatNotesToSend).count }
-
-    /// Разрешает подготовку вопроса по выбранным заметкам. Каждая отправка подтверждается отдельно.
-    func giveChatConsent(selected: Set<UUID>) {
-        let existing = Set(store.notes.map(\.id))
-        chatSelectedNoteIDs = selected.intersection(existing)
-        chatConsentGiven = true
-    }
-
-    /// Отменить передачу: идущий запрос прерывается, беседа очищается, новые запросы ждут согласия.
-    func revokeChatConsent() {
-        chatConsentGiven = false
-        chatSelectedNoteIDs = []
-        clearChat()
-    }
-
-    func setChatNote(_ id: UUID, selected: Bool) {
-        if selected { chatSelectedNoteIDs.insert(id) } else { chatSelectedNoteIDs.remove(id) }
-    }
-
-    var canSendChat: Bool { chatConsentGiven && !chatNotesToSend.isEmpty && !chatBusy && !isBlocked }
 
     @discardableResult
     func prepareChat(_ question: String) -> Bool {
-        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty, canSendChat else { return false }
-        let preview = ChatPreflight(notes: chatNotesToSend, history: chatMessages, question: q)
+        let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty, canSendChat else { return false }
+        chatPreflight = nil
         do {
-            _ = try NotesChat.requestBody(notes: preview.notes, history: preview.history, question: q)
+            chatPreflight = try makeChatPreflight(question)
+            return true
         } catch {
             showError(error.localizedDescription)
             return false
         }
-        chatPreflight = preview
-        return true
     }
 
     func cancelChatPreflight() { chatPreflight = nil }
 
     @discardableResult
+    func sendChat() -> Bool {
+        guard prepareChat(chatDraft), let preview = chatPreflight else { return false }
+        return startChat(preview)
+    }
+
+    @discardableResult
     func confirmChat() -> Bool {
         guard let preview = chatPreflight else { return false }
-        chatPreflight = nil
-        guard canSendChat, preview.notes == chatNotesToSend, preview.history == chatMessages else { return false }
-        chatMessages.append(ChatMessage(role: .user, text: preview.question))
-        chatBusy = true
-        let ask = ai.askNotes
+        guard canSendChat, (try? makeChatPreflight(preview.question)) == preview else {
+            cancelChatPreflight()
+            showDraftStatus("Источники изменились. Отправьте вопрос ещё раз.")
+            return false
+        }
+        return startChat(preview)
+    }
+
+    private func startChat(_ preview: ChatPreflight) -> Bool {
+        cancelChatPreflight()
+        let pending = ChatMessage(role: .user, text: preview.question)
+        chatDraft = ""
+        chatPendingQuestion = pending
+        errorMessage = nil
+        let ask = ai.ask
         chatTask = Task { @MainActor in
-            do {
-                let (answer, nums) = try await ask(preview.notes, preview.history, preview.question)
-                // Задачу могли отменить (clearChat) уже после ответа - не пишем в очищенную ленту.
-                if Task.isCancelled { return }
-                let valid = NotesChat.resolveSources(nums, noteCount: preview.notes.count)
-                let ids = valid.map { preview.notes[$0 - 1].id }
-                chatMessages.append(ChatMessage(role: .assistant, text: answer, sourceNoteIDs: ids))
-            } catch is CancellationError {
-                return // отмена - молча; chatBusy сбрасывает clearChat
-            } catch {
-                if Task.isCancelled { return }
-                showError(error.localizedDescription)
+            defer {
+                if chatPendingQuestion?.id == pending.id {
+                    chatPendingQuestion = nil
+                    chatTask = nil
+                }
             }
-            chatBusy = false
-            chatTask = nil
+            do {
+                let reply = try await ask(preview)
+                try Task.checkCancellation()
+                let ids = NotesChat.resolveSources(reply.sources, noteCount: preview.notes.count)
+                    .map { preview.notes[$0 - 1].id }
+                chatMessages.append(contentsOf: [
+                    pending,
+                    ChatMessage(role: .assistant, text: reply.answer, sourceNoteIDs: ids,
+                                webSources: reply.webSources, searchedWeb: preview.searchWeb),
+                ])
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                chatDraft = pending.text
+                if preview.searchWeb, let error = error as? DraftPolishError, case .http(let code) = error,
+                   [400, 402, 403, 404].contains(code) {
+                    showError("Groq отклонил веб-поиск (код \(code)). Проверьте доступ к поиску в Groq или выключите «Интернет» и повторите.")
+                } else {
+                    showError(error.localizedDescription)
+                }
+            }
         }
         return true
     }
 
-    /// Прервать идущий запрос, не очищая беседу.
     func cancelChatRequest() {
+        if let pending = chatPendingQuestion { chatDraft = pending.text }
         chatTask?.cancel()
         chatTask = nil
-        chatBusy = false
+        chatPendingQuestion = nil
+    }
+
+    private func invalidateChatRequest(if changed: Bool) {
+        guard changed else { return }
+        cancelChatPreflight()
+        cancelChatRequest()
     }
 
     func clearChat() {
         cancelChatRequest()
         cancelChatPreflight()
+        chatDraft = ""
         chatMessages = []
     }
 
@@ -605,7 +639,14 @@ final class AppState: ObservableObject {
 
     func openSource(_ id: UUID) {
         mode = .notes
+        noteSearchText = ""
         selectedNoteID = id
+    }
+
+    func askAboutNote(_ id: UUID) {
+        chatNoteScope = .selected
+        chatSelectedNoteIDs = [id]
+        mode = .ask
     }
 
     func performUndo() {

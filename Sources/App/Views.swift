@@ -73,7 +73,7 @@ struct ContentView: View {
     @State private var editing: DiaryEntry?
     @State private var pendingDelete: DiaryEntry?
 
-    @State private var polishPreview: String?
+    @State private var previousDraft: (original: String, improved: String)?
     @State private var polishBusy = false
     @State private var polishTask: Task<Void, Never>?
     @State private var keyField = ""
@@ -136,10 +136,8 @@ struct ContentView: View {
         .onChange(of: state.polishRequestToken) { _, _ in
             beginPolish()
         }
-        .sheet(isPresented: Binding(get: { polishPreview != nil }, set: { if !$0 { cancelPolish() } })) {
-            if let text = polishPreview {
-                PolishConfirmSheet(draft: text, busy: polishBusy, onCancel: cancelPolish, onSend: sendPolish)
-            }
+        .onChange(of: state.mode) { _, mode in
+            if mode != .day { cancelPolish() }
         }
         .sheet(isPresented: Binding(get: { state.keySheetIntent != nil }, set: { if !$0 { closeKeySheet() } })) {
             APIKeySheet(
@@ -331,15 +329,23 @@ struct ContentView: View {
                     .focused($focus, equals: .add)
                     .onSubmit(submit)
                     .accessibilityLabel("Новая запись в дневник")
-                if !draftIsBlank || polishBusy {
-                    Button(polishBusy ? "Причёсываю…" : "Причесать", action: beginPolish)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(Theme.accent)
-                        .disabled(draftIsBlank || state.isBlocked || polishBusy)
+                if polishBusy {
+                    ProgressView().controlSize(.small).accessibilityLabel("Groq улучшает текст")
+                    Button("Остановить", action: cancelPolish)
+                } else {
+                    Button("Улучшить текст", systemImage: "sparkles", action: beginPolish)
+                        .disabled(draftIsBlank || state.isBlocked)
                         .fixedSize()
-                        .help("Сделать одну короткую фразу. В дневник не записывает (⌥⌘↩)")
-                        .accessibilityLabel("Причесать черновик")
+                        .help("Улучшить формулировку через Groq (⌥⌘↩)")
                 }
+            }
+            if let previousDraft, draftText == previousDraft.improved, !polishBusy {
+                Button("Вернуть исходный текст") {
+                    draftText = previousDraft.original
+                    self.previousDraft = nil
+                    focus = .add
+                }
+                .buttonStyle(.borderless)
             }
             if showContext {
                 TextField("На чём остановился — чтобы потом продолжить", text: $draftContext, axis: .vertical)
@@ -421,6 +427,7 @@ struct ContentView: View {
         let ts = customTime ? draftTime : Date()
         if state.add(text: draftText, context: showContext ? draftContext : nil, timestamp: ts) {
             draftText = ""
+            previousDraft = nil
             draftContext = ""
             showContext = false
             customTime = false
@@ -429,40 +436,41 @@ struct ContentView: View {
     }
 
     private func beginPolish() {
-        let text = DraftPolish.normalizeInput(draftText)
-        guard !text.isEmpty, !state.isBlocked, !polishBusy else { return }
-        if GroqKeyStore.resolve() == nil {
+        let original = draftText
+        let text = DraftPolish.normalizeInput(original)
+        guard state.mode == .day, !text.isEmpty, !state.isBlocked, !polishBusy else { return }
+        guard let key = GroqKeyStore.resolve() else {
             keyField = ""
             keyError = nil
             state.keySheetIntent = .polish
             return
         }
-        polishPreview = text
-    }
-
-    private func sendPolish() {
-        guard let text = polishPreview, !polishBusy else { return }
-        guard let key = GroqKeyStore.resolve() else {
-            polishPreview = nil
-            state.keySheetIntent = .polish
-            return
-        }
         polishBusy = true
         polishTask = Task {
+            defer {
+                if !Task.isCancelled {
+                    polishTask = nil
+                    polishBusy = false
+                }
+            }
             do {
                 let result = try await DraftPolishClient().polish(draft: text, apiKey: key)
-                guard !Task.isCancelled else { return }
+                try Task.checkCancellation()
+                guard draftText == original else {
+                    state.showDraftStatus("Черновик изменился. Нажмите «Улучшить текст» ещё раз.")
+                    return
+                }
+                if result != original {
+                    let before = previousDraft.flatMap { $0.improved == original ? $0.original : nil } ?? original
+                    previousDraft = (before, result)
+                }
                 draftText = result
-                polishPreview = nil
-                polishBusy = false
-                state.showDraftStatus("Черновик причёсан. В дневник попадёт после «Записать».")
+                state.showDraftStatus("Формулировка обновлена.")
                 focus = .add
             } catch is CancellationError {
-                polishBusy = false
+                return
             } catch {
                 guard !Task.isCancelled else { return }
-                polishBusy = false
-                polishPreview = nil
                 state.showError(error.localizedDescription)
             }
         }
@@ -472,7 +480,6 @@ struct ContentView: View {
         polishTask?.cancel()
         polishTask = nil
         polishBusy = false
-        polishPreview = nil
     }
 
     private func closeKeySheet() {
@@ -484,10 +491,10 @@ struct ContentView: View {
     private func saveKey() {
         do {
             try GroqKeyStore.save(keyField)
-            let continuePolish = state.keySheetIntent == .polish
+            let editingDraft = state.keySheetIntent == .polish
             closeKeySheet()
-            if continuePolish {
-                DispatchQueue.main.async { beginPolish() }
+            if editingDraft {
+                state.showDraftStatus("Ключ сохранён. Нажмите «Улучшить текст».")
             }
         } catch {
             keyError = error.localizedDescription
@@ -847,6 +854,8 @@ struct NoteEditor: View {
             }
             HStack(spacing: 12) {
                 if let note {
+                    Button("Спросить") { state.askAboutNote(note.id) }
+                        .help("Использовать эту заметку в чате")
                     Button(note.pinned ? "Открепить" : "Закрепить") {
                         state.setNotePinned(note, !note.pinned)
                     }
@@ -991,99 +1000,33 @@ extension Notification.Name {
 
 struct AskView: View {
     @EnvironmentObject var state: AppState
-    @State private var draft = ""
-    @FocusState private var inputFocused: Bool
-    /// Выбор до согласия: только отметки в интерфейсе, контекст ещё не собирается.
-    @State private var pendingSelection: Set<UUID> = []
     @State private var showNoteList = false
+    @State private var noteSearch = ""
+    @State private var answerToSave: ChatMessage?
+    @FocusState private var inputFocused: Bool
 
-    private var draftIsBlank: Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private var canSubmit: Bool {
+        state.canSendChat && !state.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 14) {
-                        if state.chatMessages.isEmpty {
-                            Text(state.sortedNotes.isEmpty
-                                 ? "Сначала создайте заметки, чтобы по ним спрашивать"
-                                 : (state.chatConsentGiven ? "Спросите что-нибудь о выбранных заметках…"
-                                    : "Отметьте заметки внизу и разрешите передачу. До этого ничего не отправляется."))
-                                .font(Theme.text)
-                                .foregroundStyle(Theme.quiet)
-                                .multilineTextAlignment(.center)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: 460)
-                                .padding(.top, 80)
-                        } else {
-                            ForEach(state.chatMessages) { message in
-                                ChatBubble(message: message)
-                                    .id(message.id)
-                            }
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id("chat-bottom")
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 24)
-                    .frame(maxWidth: .infinity)
-                }
-                .onChange(of: state.chatMessages.count) { _, _ in
-                    withAnimation {
-                        proxy.scrollTo("chat-bottom", anchor: .bottom)
-                    }
-                }
-                .onAppear {
-                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+            HStack {
+                Text("Спросить").font(Theme.groupTitle)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button("Новый чат", systemImage: "square.and.pencil") {
+                    state.clearChat()
                     inputFocused = true
                 }
-            }
-
-            Divider()
-            VStack(alignment: .leading, spacing: 6) {
-                transferPanel
-                HStack(alignment: .bottom, spacing: 12) {
-                    TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .lineLimit(1...6)
-                        .font(Theme.input)
-                        .foregroundStyle(Theme.ink)
-                        .focused($inputFocused)
-                        .disabled(state.chatBusy)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(inputFocused ? Theme.accent : Theme.rail,
-                                          lineWidth: inputFocused ? 1.5 : 1))
-                        .accessibilityLabel("Вопрос по заметкам")
-
-                    if state.chatBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                            .padding(.bottom, 12)
-                            .accessibilityLabel("ИИ отвечает")
-                    }
-                    if state.chatBusy {
-                        Button("Отменить запрос") { state.cancelChatRequest() }
-                    }
-                    Button("Очистить") { state.clearChat() }
-                        .disabled(state.chatBusy || state.chatMessages.isEmpty)
-                    Button("Спросить", action: submit)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.accent)
-                        .disabled(draftIsBlank || !state.canSendChat)
-                        .accessibilityHint(state.chatConsentGiven ? "Проверить текст перед отправкой в Groq" : "Сначала выберите заметки для чата")
-                }
+                .disabled(state.chatMessages.isEmpty && !state.chatBusy && state.chatDraft.isEmpty)
             }
             .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 12)
-            .background(Theme.pane)
+            .padding(.vertical, 12)
+            Divider()
+            transcript
+            Divider()
+            composer
         }
         .onReceive(NotificationCenter.default.publisher(for: .daylogAskFocus)) { notification in
             guard let source = notification.object as? AppState, source === state else { return }
@@ -1092,186 +1035,260 @@ struct AskView: View {
         .sheet(isPresented: Binding(get: { state.chatPreflight != nil }, set: { if !$0 { state.cancelChatPreflight() } })) {
             if let preview = state.chatPreflight {
                 AIPreflightSheet(
-                    title: "Спросить по заметкам",
-                    explanation: "Groq получит выбранные заметки, историю этой беседы и новый вопрос.",
+                    title: "Перед отправкой",
+                    explanation: preview.searchWeb
+                        ? "Groq получит этот текст и сможет использовать его для поиска в интернете."
+                        : "Groq получит показанные фрагменты, последние реплики и новый вопрос.",
                     payload: preview.payload,
-                    onCancel: { state.cancelChatPreflight() },
-                    onSend: {
-                        if state.confirmChat() { draft = "" }
-                        inputFocused = true
-                    }
-                )
+                    onCancel: state.cancelChatPreflight,
+                    onSend: { if state.confirmChat() { inputFocused = true } })
             }
         }
+        .sheet(item: $answerToSave) { message in
+            ChatNoteSheet(answer: message.text) { title, body in
+                state.addNote(title: title, body: body)
+            }
+        }
+    }
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 14) {
+                    if state.chatMessages.isEmpty && !state.chatBusy {
+                        VStack(spacing: 8) {
+                            Text("О чём поговорим?").font(Theme.groupTitle).foregroundStyle(Theme.ink)
+                            Text("Спросите о своих заметках, продолжите мысль или включите «Интернет» для поиска свежих сведений.")
+                                .font(Theme.text)
+                                .foregroundStyle(Theme.quiet)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: 440)
+                        .padding(.top, 64)
+                    }
+                    ForEach(state.chatMessages) { message in
+                        ChatBubble(message: message) { answerToSave = message }
+                    }
+                    if let pending = state.chatPendingQuestion {
+                        ChatBubble(message: pending) {}
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(state.chatSearchWeb ? "Ищу в интернете и готовлю ответ…" : "Готовлю ответ…")
+                                .font(Theme.caption).foregroundStyle(Theme.quiet)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Color.clear.frame(height: 1).id("chat-bottom")
+                }
+                .padding(24)
+                .frame(maxWidth: 820)
+                .frame(maxWidth: .infinity)
+            }
+            .onChange(of: state.chatMessages.count) { _, _ in
+                withAnimation { proxy.scrollTo("chat-bottom", anchor: .bottom) }
+            }
+            .onChange(of: state.chatPendingQuestion?.id) { _, _ in
+                withAnimation { proxy.scrollTo("chat-bottom", anchor: .bottom) }
+            }
+            .onAppear {
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
+                inputFocused = true
+            }
+        }
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                Picker("Заметки", selection: $state.chatNoteScope) {
+                    ForEach(ChatNoteScope.allCases, id: \.self) { scope in
+                        Text(scope.rawValue).tag(scope)
+                    }
+                }
+                .fixedSize()
+                .help("Выберите, какие заметки использовать для следующего вопроса")
+                if state.chatNoteScope == .selected {
+                    Button("Выбрано \(state.chatSelectedNoteIDs.count)") { showNoteList.toggle() }
+                        .popover(isPresented: $showNoteList) { noteChecklist }
+                }
+                Toggle("Интернет", isOn: $state.chatSearchWeb)
+                    .toggleStyle(QuietCheckboxStyle())
+                    .help("Искать свежие сведения через Groq")
+                Spacer()
+                Button("Предпросмотр") { state.prepareChat(state.chatDraft) }
+                    .disabled(!canSubmit)
+                    .help("Посмотреть заметки и реплики, которые получит Groq")
+            }
+            .disabled(state.chatBusy || state.isBlocked)
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Напишите сообщение", text: $state.chatDraft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...6)
+                    .font(Theme.input)
+                    .foregroundStyle(Theme.ink)
+                    .focused($inputFocused)
+                    .disabled(state.chatBusy || state.isBlocked)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(inputFocused ? Theme.accent : Theme.rail, lineWidth: inputFocused ? 1.5 : 1))
+                if state.chatBusy {
+                    Button("Остановить") {
+                        state.cancelChatRequest()
+                        inputFocused = true
+                    }
+                } else {
+                    Button("Отправить", systemImage: "arrow.up", action: submit)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                        .disabled(!canSubmit)
+                        .help("Отправить вопрос в Groq (⌘↩)")
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
+        .background(Theme.pane)
     }
 
     private func submit() {
-        guard !draftIsBlank, state.canSendChat else { return }
-        state.prepareChat(draft)
+        if state.sendChat() { inputFocused = true }
     }
 
-    private var allNotes: [DiaryNote] { state.sortedNotes }
-
-    private func noteTitle(_ note: DiaryNote) -> String {
-        note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без заголовка" : note.title
-    }
-
-    /// До согласия: список заметок с отметками и кнопки «Разрешить» / «Отмена».
-    /// После: объём передачи виден прямо в чате, список можно раскрыть и снять отдельные заметки.
-    @ViewBuilder private var transferPanel: some View {
-        if allNotes.isEmpty {
-            HStack(spacing: 12) {
-                Text("Заметок нет. Спрашивать пока не о чем, отправка выключена.")
-                    .font(Theme.text).foregroundStyle(Theme.quiet)
+    private var noteChecklist: some View {
+        let query = noteSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let notes = query.isEmpty ? state.sortedNotes : state.store.searchNotes(query)
+        return VStack(alignment: .leading, spacing: 10) {
+            TextField("Найти заметку", text: $noteSearch)
+                .textFieldStyle(.roundedBorder)
+            if notes.isEmpty {
+                Text("Заметок не найдено").foregroundStyle(Theme.quiet)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(notes) { note in
+                            Toggle(note.title.isEmpty ? "Без заголовка" : note.title, isOn: Binding(
+                                get: { state.chatSelectedNoteIDs.contains(note.id) },
+                                set: { selected in
+                                    if selected { state.chatSelectedNoteIDs.insert(note.id) }
+                                    else { state.chatSelectedNoteIDs.remove(note.id) }
+                                }))
+                            .toggleStyle(QuietCheckboxStyle())
+                            .lineLimit(2)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+            }
+            HStack {
+                Button("Снять отметки") { state.chatSelectedNoteIDs = [] }
+                    .disabled(state.chatSelectedNoteIDs.isEmpty)
                 Spacer()
-                Button("Создать заметку") {
-                    state.mode = .notes
-                    state.selectedNoteID = nil
-                    state.noteSearchText = ""
-                    NotificationCenter.default.post(name: .daylogNewNote, object: state)
-                }
-            }
-        } else if !state.chatConsentGiven {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Передача заметок в Groq")
-                    .font(Theme.textStrong).foregroundStyle(Theme.ink)
-                    .accessibilityAddTraits(.isHeader)
-                Text("Пока вы не разрешите, заметки никуда не отправляются. Получатель: Groq. Уйдут только отмеченные заметки, ваш вопрос и вопросы и ответы этой беседы. При изменении набора заметок или отмене передачи беседа начинается заново. Дневник и план не отправляются. Разрешение само ничего не отправляет.")
-                    .font(Theme.caption).foregroundStyle(Theme.quiet)
-                    .fixedSize(horizontal: false, vertical: true)
-                noteChecklist(selection: Binding(get: { pendingSelection }, set: { pendingSelection = $0 }))
-                HStack(spacing: 12) {
-                    Text(volumeText(allNotes.filter { pendingSelection.contains($0.id) }))
-                        .font(Theme.caption).foregroundStyle(Theme.quiet)
-                    Spacer()
-                    Button("Отмена") {
-                        pendingSelection = []
-                        state.revokeChatConsent()
-                    }
-                    Button("Разрешить передачу") {
-                        state.giveChatConsent(selected: pendingSelection)
-                        inputFocused = true
-                    }
-                    .disabled(pendingSelection.isEmpty || state.isBlocked)
-                    .accessibilityHint("Разрешить отправлять отмеченные заметки вместе с вопросом. Вопрос не отправится сам.")
-                }
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 10) {
-                    Text("В Groq уйдут: \(volumeText(state.chatNotesToSend))")
-                        .font(Theme.caption).foregroundStyle(Theme.quiet)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button { showNoteList.toggle() } label: {
-                        Text(showNoteList ? "Скрыть список" : "Выбрать заметки").frame(minHeight: 24).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.borderless)
-                    Button {
-                        pendingSelection = state.chatSelectedNoteIDs
-                        state.revokeChatConsent()
-                        showNoteList = false
-                    } label: { Text("Отменить передачу").frame(minHeight: 24).contentShape(Rectangle()) }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Отменить передачу")
-                    .accessibilityHint("Прервать запрос, очистить беседу и запретить отправку заметок до нового разрешения")
-                }
-                if showNoteList {
-                    noteChecklist(selection: Binding(get: { state.chatSelectedNoteIDs }, set: { state.chatSelectedNoteIDs = $0 }))
-                    Text("При изменении набора заметок или отмене передачи беседа начинается заново.")
-                        .font(Theme.caption).foregroundStyle(Theme.quiet)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if state.chatNotesToSend.isEmpty {
-                    Text("Не отмечено ни одной заметки, отправка выключена.")
-                        .font(Theme.caption).foregroundStyle(.red)
-                }
+                Button("Готово") { showNoteList = false }
             }
         }
-    }
-
-    private func volumeText(_ notes: [DiaryNote]) -> String {
-        let chars = NotesChat.numberedNotes(notes).count
-        let over = chars > NotesChat.maxContextCharacters ? " (больше допустимых \(NotesChat.maxContextCharacters))" : ""
-        return "заметок \(notes.count) из \(allNotes.count), \(chars) знаков\(over), плюс вопрос и эта беседа"
-    }
-
-    @ViewBuilder private func noteChecklist(selection: Binding<Set<UUID>>) -> some View {
-        // Короткий список без прокрутки, длинный в ограниченной области.
-        if allNotes.count <= 5 {
-            noteChecklistRows(selection: selection)
-        } else {
-            ScrollView { noteChecklistRows(selection: selection) }.frame(maxHeight: 140)
-        }
-    }
-
-    private func noteChecklistRows(selection: Binding<Set<UUID>>) -> some View {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(allNotes) { note in
-                    Toggle(isOn: Binding(
-                        get: { selection.wrappedValue.contains(note.id) },
-                        set: { on in
-                            if on { selection.wrappedValue.insert(note.id) } else { selection.wrappedValue.remove(note.id) }
-                        })) {
-                        Text("\(noteTitle(note)) · \(note.body.count) знаков").lineLimit(1)
-                    }
-                    .toggleStyle(QuietCheckboxStyle())
-                    .frame(minHeight: 24)
-                    .disabled(state.chatBusy)
-                    .accessibilityLabel("Передавать заметку «\(noteTitle(note))»")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .frame(width: 300)
     }
 }
 
 private struct ChatBubble: View {
     @EnvironmentObject var state: AppState
     let message: ChatMessage
+    let onSave: () -> Void
 
     var body: some View {
         HStack {
-            if message.role == .user { Spacer(minLength: 60) }
+            if message.role == .user { Spacer(minLength: 44) }
             VStack(alignment: .leading, spacing: 8) {
                 Text(message.text)
                     .foregroundStyle(message.role == .user ? Theme.canvas : Theme.ink)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                if message.role == .assistant, !message.sourceNoteIDs.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(message.sourceNoteIDs, id: \.self) { id in
-                                if let note = state.sortedNotes.first(where: { $0.id == id }) {
-                                    Button {
-                                        state.openSource(id)
-                                    } label: {
-                                        Text(note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                             ? "Без заголовка" : note.title)
-                                            .font(Theme.caption)
-                                            .lineLimit(1)
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 4)
-                                            .frame(minHeight: 24)
-                                            .background(Capsule().fill(Theme.accent.opacity(0.12)))
-                                            .contentShape(Capsule())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(Theme.accent)
-                                    .help("Открыть заметку-источник")
-                                }
-                            }
-                        }
-                    }
+                if message.role == .assistant {
+                    sources
+                    Button("Сохранить в заметки…", systemImage: "note.text.badge.plus", action: onSave)
+                        .font(Theme.caption)
+                        .buttonStyle(.borderless)
+                        .disabled(state.isBlocked)
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .background(RoundedRectangle(cornerRadius: 12)
                 .fill(message.role == .user ? Theme.accent : Theme.field))
-            .frame(maxWidth: 560, alignment: message.role == .user ? .trailing : .leading)
-            if message.role == .assistant { Spacer(minLength: 60) }
+            .frame(maxWidth: 620, alignment: message.role == .user ? .trailing : .leading)
+            if message.role == .assistant { Spacer(minLength: 44) }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var sources: some View {
+        let notes = message.sourceNoteIDs.compactMap { id in state.notes.first { $0.id == id } }
+        if !notes.isEmpty {
+            Text("Из заметок").font(Theme.caption).foregroundStyle(Theme.quiet)
+            ForEach(notes) { note in
+                Button { state.openSource(note.id) } label: {
+                    Label(note.title.isEmpty ? "Без заголовка" : note.title, systemImage: "note.text")
+                        .lineLimit(1)
+                }
+                .font(Theme.caption)
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.accent)
+            }
+        }
+        if !message.webSources.isEmpty {
+            Text("Из интернета").font(Theme.caption).foregroundStyle(Theme.quiet)
+            ForEach(message.webSources) { source in
+                Link(destination: source.url) {
+                    Label(source.title, systemImage: "arrow.up.right").lineLimit(1)
+                }
+                .font(Theme.caption)
+                .foregroundStyle(Theme.accent)
+                .help(source.url.absoluteString)
+            }
+        } else if message.searchedWeb {
+            Text("Groq не вернул ссылки на веб-источники.")
+                .font(Theme.caption).foregroundStyle(Theme.quiet)
+        }
+    }
+}
+
+private struct ChatNoteSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var bodyText: String
+    let save: (String, String) -> Bool
+
+    init(answer: String, save: @escaping (String, String) -> Bool) {
+        _bodyText = State(initialValue: answer)
+        self.save = save
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Сохранить ответ в заметки").font(Theme.groupTitle)
+            TextField("Заголовок", text: $title)
+                .textFieldStyle(.roundedBorder)
+            TextEditor(text: $bodyText)
+                .font(Theme.text)
+                .frame(minHeight: 180)
+                .accessibilityLabel("Текст новой заметки")
+            HStack {
+                Spacer()
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Сохранить") { if save(title, bodyText) { dismiss() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
     }
 }
 
@@ -1439,45 +1456,6 @@ struct EntryEditor: View {
         } else {
             error = state.errorMessage
         }
-    }
-}
-
-private struct PolishConfirmSheet: View {
-    let draft: String
-    let busy: Bool
-    let onCancel: () -> Void
-    let onSend: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Причесать черновик")
-                .font(Theme.title)
-                .foregroundStyle(Theme.ink)
-            Text("В Groq отправляется только текст этого черновика; записи дневника и задачи не отправляются. Условия обработки данных определяет Groq. В дневник текст попадёт только после «Записать».")
-                .font(Theme.text)
-                .foregroundStyle(Theme.quiet)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(draft)
-                .font(Theme.input)
-                .foregroundStyle(Theme.ink)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
-            HStack {
-                Spacer()
-                Button("Отмена", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(busy)
-                Button(busy ? "Отправляю…" : "Отправить", action: onSend)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(busy)
-            }
-        }
-        .padding(24)
-        .frame(width: 460)
-        .interactiveDismissDisabled(busy)
     }
 }
 

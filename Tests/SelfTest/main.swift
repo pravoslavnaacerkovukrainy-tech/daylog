@@ -475,7 +475,8 @@ test("Причёсывание: в запрос попадает только ч
     check(input[1]["content"] as? String == "кран течёт, звонил сантехнику", "в user только черновик")
     let raw = String(data: req.httpBody!, encoding: .utf8)!
     check(!raw.contains("GROQ-TEST-KEY"), "ключа нет в теле")
-    check(!raw.contains("план"), "в теле нет постороннего дневника")
+    check(input[0]["role"] as? String == "system" && input[0]["content"] as? String == DraftPolish.systemPrompt,
+          "инструкция фиксирована и не содержит других записей пользователя")
     check(req.value(forHTTPHeaderField: "Authorization") == "Bearer GROQ-TEST-KEY", "ключ в заголовке")
     check(req.timeoutInterval == 30, "таймаут 30 с")
 }
@@ -499,6 +500,9 @@ test("Причёсывание: запасные формы ответа и ош
     check(try DraftPolish.parse(direct) == "Купил хлеб", "output_text")
     let fenced = #"{"choices":[{"message":{"role":"assistant","content":"```\nЗапись: «Закрыл кран»\nПояснение: готово\n```","reasoning_content":"PRIVATE-REASONING"},"finish_reason":"stop"}]}"#.data(using: .utf8)!
     check(try DraftPolish.parse(fenced) == "Закрыл кран", "первая строка без подписи: \(try DraftPolish.parse(fenced))")
+    let multiline = try breakdownEnvelope("Позвонил мастеру.\nДоговорились уточнить время завтра.")
+    check(try DraftPolish.parse(multiline) == "Позвонил мастеру. Договорились уточнить время завтра.",
+          "вторая мысль из отредактированной записи сохраняется")
     expectError("пустой output") { _ = try DraftPolish.parse(#"{"choices":[]}"#.data(using: .utf8)!) }
     check(DraftPolishError.http(429).localizedDescription.contains("лимит"), "сообщение об исчерпанном лимите")
 }
@@ -733,6 +737,28 @@ test("NotesChat.resolveSources: отбрасывает вне диапазона
     check(NotesChat.resolveSources([1, 3, 5, 3], noteCount: 3) == [1, 3], "5 вне, дубль 3 убран")
     check(NotesChat.resolveSources([0, -1, 2], noteCount: 2) == [2], "0/отриц. отброшены")
     check(NotesChat.resolveSources([1, 2], noteCount: 0) == [], "noteCount=0 → пусто, без краша")
+}
+
+test("Чат: поиск подбирает фрагмент за пределами начала заметки и учитывает уточнение") {
+    let notes = [
+        DiaryNote(title: "Задачи", body: String(repeating: "Другой текст. ", count: 150) + "Groq подключён к проекту.", createdAt: day1, updatedAt: day1),
+        DiaryNote(title: "Личное", body: "Купить хлеб", createdAt: day1, updatedAt: day1),
+    ]
+    let found = NotesChat.relevantNotes(in: notes, question: "Когда подключили Groq?", history: [])
+    check(found.count == 1 && found.first?.body.contains("Groq подключён") == true, "отобрана заметка и совпавший фрагмент")
+    check(found.first?.body.hasPrefix("…") == true && found[0].body.utf8.count < 1_200, "длинная заметка сокращена")
+    let history = [ChatMessage(role: .user, text: "Расскажи про Groq"), ChatMessage(role: .assistant, text: "Ответ")]
+    check(NotesChat.relevantNotes(in: notes, question: "Что ещё?", history: history).map(\.id) == [notes[0].id],
+          "уточнение опирается на тему предыдущей реплики")
+    check(NotesChat.relevantNotes(in: notes, question: "Что делать с машиной?", history: []).isEmpty,
+          "без совпадений не прикладываются несвязанные заметки")
+    let large = (0..<10).flatMap { _ in [
+        ChatMessage(role: .user, text: String(repeating: "я", count: 700)),
+        ChatMessage(role: .assistant, text: String(repeating: "я", count: 2_000)),
+    ] }
+    let recent = NotesChat.recentHistory(large)
+    check(recent.count == 8 && recent.last?.id == large.last?.id, "уходят четыре последние пары реплик")
+    check(recent.last?.text.utf8.count ?? 2_000 <= 1_200, "длинный ответ в истории сокращён")
 }
 
 // MARK: Итог дня - сборка контекста и разбор ответа
@@ -1800,6 +1826,38 @@ test("Groq: все текстовые клиенты получают ответ
           "по одному запросу на действие, только Groq")
 }
 
+test("Чат с интернетом: один запрос Groq и ссылки только из результата поиска") {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [BreakdownMockProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+    let response = #"{"choices":[{"finish_reason":"stop","message":{"content":"Ответ https://example.net/guessed\n⟦источники: 1⟧","executed_tools":[{"type":"browser_search","browser_results":[{"url":"https://example.com/news","title":"Новости"},{"url":"file:///tmp/test","title":"Локальный файл"}],"search_results":{"results":[{"url":"https://example.com/news","title":"Дубль"},{"url":"https://example.org/docs"}]}}]}}]}"#
+    BreakdownMockProtocol.requests = []
+    BreakdownMockProtocol.handler = { _ in (200, Data(response.utf8)) }
+    let note = DiaryNote(title: "Заголовок", body: "Текст из заметки", createdAt: day1, updatedAt: day1)
+    let history = [ChatMessage(role: .user, text: "Прошлый вопрос")]
+    let client = NotesChatClient(session: session)
+    let answer = try runBreakdownAsync {
+        try await client.ask(notes: [note], history: history, question: "Сверь с интернетом", apiKey: "FIXTURE", searchWeb: true)
+    }
+    check(BreakdownMockProtocol.requests.count == 1 && BreakdownMockProtocol.requests.first?.url == GroqChat.endpoint,
+          "выполнен один HTTP-запрос к Groq")
+    let data = try NotesChat.requestBody(notes: [note], history: history, question: "Сверь с интернетом", searchWeb: true)
+    let body = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    check(body["tool_choice"] as? String == "required" && body["tools"] as? [[String: String]] == [["type": "browser_search"]],
+          "Groq вызовет встроенный поиск")
+    check(body["response_format"] == nil && body["citation_options"] as? String == "enabled", "поиск совместим с текстовым ответом")
+    let messages = body["messages"] as! [[String: String]]
+    check(messages[1]["content"] == "Прошлый вопрос" && messages.last?["content"]?.contains("Текст из заметки") == true,
+          "заметка, история и интернет совмещаются")
+    check(answer.sources == [1] && answer.webSources.map(\.title) == ["Новости", "example.org"], "источники заметки и поиска разобраны")
+    check(answer.webSources.allSatisfy { $0.url.host != "example.net" && $0.url.scheme == "https" },
+          "ссылки из свободного ответа и небезопасные схемы не стали источниками")
+    let offline = try NotesChat.requestBody(notes: [], history: [], question: "Вопрос")
+    let payload = try JSONSerialization.jsonObject(with: offline) as! [String: Any]
+    check(payload["tools"] == nil && payload["tool_choice"] == nil, "обычный чат не включает веб-поиск")
+}
+
 test("Разбиение: URLProtocol, ошибки, отмена и отсутствие повторов") {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [BreakdownMockProtocol.self]
@@ -2139,7 +2197,7 @@ test("Пересмотр контекста сохраняет ручные пр
 final class AISpy {
     var polished: [String] = []
     var summarized: [[DiaryEntry]] = []
-    var asked: [(notes: [DiaryNote], history: [ChatMessage], question: String)] = []
+    var asked: [ChatPreflight] = []
     var failure: Error?
     var askDelayNanoseconds: UInt64 = 0
     var calls: Int { polished.count + summarized.count + asked.count }
@@ -2155,13 +2213,13 @@ final class AISpy {
                 if let failure = self.failure { throw failure }
                 return "Условный итог"
             },
-            askNotes: { [unowned self] notes, history, question in
-                self.asked.append((notes, history, question))
+            ask: { [unowned self] request in
+                self.asked.append(request)
                 if self.askDelayNanoseconds > 0 {
                     try await Task<Never, Never>.sleep(nanoseconds: self.askDelayNanoseconds)
                 }
                 if let failure = self.failure { throw failure }
-                return ("Ответ [1]", [1])
+                return ChatReply(answer: "Ответ [1]", sources: [1], webSources: [])
             })
     }
 }
@@ -2285,117 +2343,83 @@ test("P1-05: «Оформить» и итог дня молчат до «Отп�
     }
 }
 
-test("P1-06: чат без согласия молчит, уходят только выбранные заметки") {
-    try MainActor.assumeIsolated {
+test("Чат: автоматический подбор, предпросмотр и ручной выбор") {
+    MainActor.assumeIsolated {
         let spy = AISpy()
-        let empty = AppState(store: DiaryStore(directory: freshDir("p1-chat-empty")), ai: spy.services)
-        empty.giveChatConsent(selected: [])
-        check(!empty.canSendChat && !empty.prepareChat("Вопрос") && spy.calls == 0, "без заметок отправка выключена")
-
-        let state = AppState(store: DiaryStore(directory: freshDir("p1-chat")), ai: spy.services)
-        check(state.addNote(title: "Альфа", body: "условный текст альфа"), "заметка A")
-        check(state.addNote(title: "Бета", body: "ЛИЧНОЕ-НЕ-ВЫБРАНО"), "заметка B")
-        check(state.addNote(title: "Гамма", body: "условный текст гамма"), "заметка C")
-        let byTitle = Dictionary(uniqueKeysWithValues: state.notes.map { ($0.title, $0.id) })
-        check(!state.prepareChat("Что в заметках?") && spy.calls == 0 && state.chatMessages.isEmpty, "без согласия вопрос не уходит и контекст не собирается")
-        check(state.chatNotesToSend.isEmpty, "до согласия контекст пуст")
-        state.giveChatConsent(selected: [byTitle["Альфа"]!, byTitle["Бета"]!, byTitle["Гамма"]!])
-        check(spy.calls == 0 && state.chatMessages.isEmpty, "согласие само ничего не отправляет")
-        state.setChatNote(byTitle["Бета"]!, selected: false)
-        check(state.chatContextCharacters == NotesChat.numberedNotes(state.chatNotesToSend).count && state.chatNotesToSend.count == 2, "объём считается по выбранным")
-        check(state.prepareChat("Что в заметках?") && spy.calls == 0, "показ запроса не обращается к сети")
-        check(state.chatPreflight?.payload.contains("условный текст альфа") == true
-              && state.chatPreflight?.payload.contains("ЛИЧНОЕ-НЕ-ВЫБРАНО") == false, "на экране только выбранные заметки")
+        let state = AppState(store: DiaryStore(directory: freshDir("chat-auto")), ai: spy.services)
+        check(state.addNote(title: "База знаний", body: "Хранить в Markdown"), "заметка по теме")
+        check(state.addNote(title: "Поездка", body: "Несвязанный текст"), "посторонняя заметка")
+        check(state.prepareChat("Что решили по базе знаний?") && spy.calls == 0, "предпросмотр не обращается к сети")
+        check(state.chatPreflight?.notes.map(\.title) == ["База знаний"], "контекст подобран из всех заметок")
+        check(state.chatPreflight?.payload.contains("Несвязанный текст") == false, "посторонняя заметка не попала в контекст")
         state.cancelChatPreflight()
-        check(!state.confirmChat() && spy.calls == 0, "отмена показа исключает отправку")
-        let longQuestion = String(repeating: "я", count: GroqChat.maxRequestBytes)
-        check(!state.prepareChat(longQuestion) && state.chatPreflight == nil && spy.calls == 0, "лимит полного запроса проверяется до отправки")
-        check(state.prepareChat("Что в заметках?"), "снимок для проверки создан")
-        state.setChatNote(byTitle["Гамма"]!, selected: false)
-        check(!state.confirmChat() && spy.calls == 0, "изменение списка отменяет показанный снимок")
-        state.setChatNote(byTitle["Гамма"]!, selected: true)
-        check(state.prepareChat("Что в заметках?") && state.confirmChat(), "после подтверждения вопрос отправлен")
+        check(!state.confirmChat() && spy.calls == 0, "отмена просмотра исключает отправку")
+        state.chatDraft = "Что решили по базе знаний?"
+        check(state.sendChat(), "можно отправить одним действием")
         pumpMain { !state.chatBusy }
-        check(spy.asked.count == 1 && spy.asked[0].question == "Что в заметках?", "ушёл вопрос")
-        let sentIDs = Set(spy.asked[0].notes.map(\.id))
-        check(sentIDs == [byTitle["Альфа"]!, byTitle["Гамма"]!], "ушли только выбранные заметки")
-        let body = String(decoding: try NotesChat.requestBody(notes: spy.asked[0].notes, history: spy.asked[0].history, question: spy.asked[0].question), as: UTF8.self)
-        check(!body.contains("ЛИЧНОЕ-НЕ-ВЫБРАНО") && body.contains("условный текст альфа"), "невыбранная заметка отсутствует в теле запроса")
-        check(state.chatMessages.last?.sourceNoteIDs == [spy.asked[0].notes[0].id], "источник разрешается по отправленному снимку")
-        state.revokeChatConsent()
-        check(!state.prepareChat("Ещё вопрос") && spy.asked.count == 1, "после отмены передачи сеть невозможна")
-        state.giveChatConsent(selected: [])
-        check(!state.canSendChat && !state.prepareChat("Ещё вопрос") && spy.asked.count == 1, "согласие без выбранных заметок не отправляет")
+        let note = state.notes.first { $0.title == "Поездка" }!
+        state.askAboutNote(note.id)
+        check(state.chatNoteScope == .selected && state.mode == .ask, "действие из редактора открывает чат с этой заметкой")
+        check(state.prepareChat("Подведи итог") && state.chatPreflight?.notes == [note], "ручной режим берёт только выбранную заметку")
+        check(state.chatPreflight?.history.map(\.text) == ["Что решили по базе знаний?", "Ответ [1]"], "реплики сохраняются при смене источников")
+        state.chatSearchWeb = true
+        check(!state.confirmChat(), "смена источников закрывает устаревший предпросмотр")
+        check(state.prepareChat("Уточни в интернете") && state.confirmChat(), "подтверждение актуального запроса")
+        pumpMain { !state.chatBusy }
+        check(spy.asked.last?.searchWeb == true && spy.asked.last?.notes == [note], "в один запрос передаются заметка и включённый веб-поиск")
+        check(state.chatMessages.last?.sourceNoteIDs == [note.id], "ссылка ведёт к заметке из этого запроса")
+        state.openSource(note.id)
+        check(state.mode == .notes && state.selectedNoteID == note.id, "переход к источнику")
     }
 }
 
-test("P1-07: неизменный набор сохраняет историю, новый набор очищает её") {
+test("Чат без заметок, новый диалог, сбои и отмена") {
     MainActor.assumeIsolated {
         let spy = AISpy()
-        let state = AppState(store: DiaryStore(directory: freshDir("chat-selection-history")), ai: spy.services)
-        check(state.addNote(title: "Альфа", body: "А"), "заметка A")
-        check(state.addNote(title: "Бета", body: "Б"), "заметка B")
-        let ids = Set(state.notes.map(\.id))
-        let beta = state.notes.first { $0.title == "Бета" }!.id
-        state.giveChatConsent(selected: ids)
-        check((state.prepareChat("Первый вопрос") && state.confirmChat()), "первый вопрос")
+        let state = AppState(store: DiaryStore(directory: freshDir("chat-empty")), ai: spy.services)
+        state.chatDraft = "Предложи идеи"
+        check(state.sendChat(), "чат доступен с пустой базой")
         pumpMain { !state.chatBusy }
-        check((state.prepareChat("Второй вопрос") && state.confirmChat()), "второй вопрос")
+        check(spy.asked.first?.notes.isEmpty == true && state.chatMessages.count == 2, "обычный диалог не требует заметок")
+        state.chatSearchWeb = true
+        spy.failure = DraftPolishError.http(403)
+        state.chatDraft = "Поищи новости"
+        check(state.sendChat(), "запрос с поиском")
         pumpMain { !state.chatBusy }
-        check(spy.asked.count == 2, "оба вопроса ушли")
-        check(spy.asked[1].history.map(\.text) == ["Первый вопрос", "Ответ [1]"], "при том же наборе история уходит с вопросом")
-        let before = state.chatMessages
-        state.giveChatConsent(selected: ids)
-        state.setChatNote(beta, selected: true)
-        check(state.chatMessages == before, "повтор того же набора беседу не очищает")
-        state.setChatNote(beta, selected: false)
-        check(state.chatMessages.isEmpty, "реальное изменение набора очищает беседу")
-        check((state.prepareChat("После смены") && state.confirmChat()), "вопрос после смены набора")
-        pumpMain { !state.chatBusy }
-        check(spy.asked.last?.history.isEmpty == true, "после смены набора прежняя история не уходит")
-    }
-}
-
-test("P1-08: отмена передачи и повторное разрешение начинают пустую беседу") {
-    MainActor.assumeIsolated {
-        let spy = AISpy()
-        let state = AppState(store: DiaryStore(directory: freshDir("chat-revoke-history")), ai: spy.services)
-        _ = state.addNote(title: "Альфа", body: "А")
-        let selected = Set(state.notes.map(\.id))
-        state.giveChatConsent(selected: selected)
-        _ = (state.prepareChat("До отмены") && state.confirmChat())
-        pumpMain { !state.chatBusy }
-        check(!state.chatMessages.isEmpty, "перед отменой есть история")
-        state.revokeChatConsent()
-        check(state.chatMessages.isEmpty && !state.chatConsentGiven && state.chatSelectedNoteIDs.isEmpty, "отмена очищает беседу и выбор")
-        state.giveChatConsent(selected: selected)
-        check(state.chatMessages.isEmpty, "повторное разрешение не восстанавливает беседу")
-        _ = (state.prepareChat("После отмены") && state.confirmChat())
-        pumpMain { !state.chatBusy }
-        check(spy.asked.count == 2 && spy.asked[1].history.isEmpty, "запрос после повторного разрешения уходит без прежней истории")
-    }
-}
-
-test("P1-09: смена набора прерывает идущий запрос и отбрасывает поздний ответ") {
-    MainActor.assumeIsolated {
-        let spy = AISpy()
+        check(state.errorMessage?.contains("веб-поиск") == true && state.chatDraft == "Поищи новости", "сбой Groq объяснён, вопрос можно повторить")
+        check(state.chatMessages.count == 2, "ошибка не оставляет неполную пару реплик")
+        spy.failure = nil
         spy.askDelayNanoseconds = 5_000_000_000
-        let state = AppState(store: DiaryStore(directory: freshDir("chat-selection-cancel")), ai: spy.services)
-        _ = state.addNote(title: "Альфа", body: "А")
-        _ = state.addNote(title: "Бета", body: "Б")
-        let beta = state.notes.first { $0.title == "Бета" }!.id
-        state.giveChatConsent(selected: Set(state.notes.map(\.id)))
-        _ = (state.prepareChat("Идущий вопрос") && state.confirmChat())
-        pumpMain { spy.asked.count == 1 }
-        check(state.chatBusy && state.chatMessages.map(\.text) == ["Идущий вопрос"], "запрос ещё выполняется")
-        state.setChatNote(beta, selected: false)
-        check(!state.chatBusy && state.chatMessages.isEmpty, "смена набора прерывает запрос и очищает ленту")
+        check(state.sendChat(), "повторный запрос")
+        pumpMain { spy.asked.count == 3 }
+        check(state.chatPendingQuestion?.text == "Поищи новости", "вопрос виден во время запроса")
+        state.cancelChatRequest()
+        check(!state.chatBusy && state.chatDraft == "Поищи новости", "остановка возвращает черновик")
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        check(state.chatMessages.isEmpty, "отменённый ответ не возвращается в ленту")
+        check(state.chatMessages.count == 2, "после отмены сохраняются только завершённые реплики")
+        state.clearChat()
+        check(state.chatMessages.isEmpty && state.chatDraft.isEmpty, "новая беседа очищает реплики и черновик")
         spy.askDelayNanoseconds = 0
-        _ = (state.prepareChat("Новый вопрос") && state.confirmChat())
+        state.chatNoteScope = .none
+        state.chatDraft = "Новый вопрос"
+        check(state.sendChat(), "новая беседа")
         pumpMain { !state.chatBusy }
-        check(spy.asked.count == 2 && spy.asked[1].history.isEmpty, "новый запрос начинается без истории отменённой беседы")
+        check(spy.asked.last?.history.isEmpty == true && spy.asked.last?.notes.isEmpty == true, "новая беседа начинается без старого контекста")
+    }
+}
+
+test("Чат: предпросмотр проверяет изменения заметки и общий лимит") {
+    MainActor.assumeIsolated {
+        let spy = AISpy()
+        let state = AppState(store: DiaryStore(directory: freshDir("chat-stale")), ai: spy.services)
+        _ = state.addNote(title: "График", body: "Исходный текст")
+        let id = state.notes[0].id
+        state.askAboutNote(id)
+        check(state.prepareChat("Расскажи о графике"), "готовится снимок")
+        _ = state.updateNote(id: id, title: "График", body: "Обновлённый текст")
+        check(!state.confirmChat() && spy.asked.isEmpty, "устаревший снимок не отправляется")
+        let long = String(repeating: "я", count: GroqChat.maxRequestBytes)
+        check(!state.prepareChat(long) && state.chatPreflight == nil && spy.asked.isEmpty, "слишком длинный запрос не отправляется")
     }
 }
 
