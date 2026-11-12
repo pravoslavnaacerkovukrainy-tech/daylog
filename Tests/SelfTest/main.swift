@@ -2013,15 +2013,18 @@ test("Чат с интернетом: один запрос Groq и ссылки
           "выполнен один HTTP-запрос к Groq")
     let data = try NotesChat.requestBody(notes: [note], history: history, question: "Сверь с интернетом", searchWeb: true)
     let body = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-    check(body["tool_choice"] as? String == "required" && body["tools"] as? [[String: String]] == [["type": "browser_search"]],
-          "Groq вызовет встроенный поиск")
-    check(body["response_format"] == nil && body["citation_options"] as? String == "enabled", "поиск совместим с текстовым ответом")
+    check(body["tool_choice"] as? String == "auto" && body["tools"] as? [[String: String]] == [["type": "browser_search"]],
+          "Groq может искать в интернете или ответить по заметкам")
+    check(body["response_format"] == nil, "поиск совместим с текстовым ответом")
     let messages = body["messages"] as! [[String: String]]
     check(messages[1]["content"] == "Прошлый вопрос" && messages.last?["content"]?.contains("Текст из заметки") == true,
           "заметка, история и интернет совмещаются")
     check(answer.sources == [1] && answer.webSources.map(\.title) == ["Новости", "example.org"], "источники заметки и поиска разобраны")
     check(answer.webSources.allSatisfy { $0.url.host != "example.net" && $0.url.scheme == "https" },
           "ссылки из свободного ответа и небезопасные схемы не стали источниками")
+    let notesOnlyResponse = #"{"choices":[{"finish_reason":"stop","message":{"content":"Ответ из заметки\n⟦источники: 1⟧"}}]}"#
+    let notesOnly = try NotesChat.reply(Data(notesOnlyResponse.utf8), searchWeb: true)
+    check(notesOnly.sources == [1] && notesOnly.webSources.isEmpty, "ответ по заметкам с включённым интернетом допустим")
     let offline = try NotesChat.requestBody(notes: [], history: [], question: "Вопрос")
     let payload = try JSONSerialization.jsonObject(with: offline) as! [String: Any]
     check(payload["tools"] == nil && payload["tool_choice"] == nil, "обычный чат не включает веб-поиск")
@@ -2551,11 +2554,11 @@ test("Чат без заметок, новый диалог, сбои и отм�
         pumpMain { !state.chatBusy }
         check(spy.asked.first?.notes.isEmpty == true && state.chatMessages.count == 2, "обычный диалог не требует заметок")
         state.chatSearchWeb = true
-        spy.failure = DraftPolishError.http(403)
+        spy.failure = DraftPolishError.http(400)
         state.chatDraft = "Поищи новости"
         check(state.sendChat(), "запрос с поиском")
         pumpMain { !state.chatBusy }
-        check(state.errorMessage?.contains("веб-поиск") == true && state.chatDraft == "Поищи новости", "сбой Groq объяснён, вопрос можно повторить")
+        check(state.errorMessage?.contains("код 400") == true && state.chatDraft == "Поищи новости", "отказ Groq объяснён, вопрос можно повторить")
         check(state.chatMessages.count == 2, "ошибка не оставляет неполную пару реплик")
         spy.failure = nil
         spy.askDelayNanoseconds = 5_000_000_000

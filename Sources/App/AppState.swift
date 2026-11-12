@@ -610,10 +610,12 @@ final class AppState: ObservableObject {
             } catch {
                 guard !Task.isCancelled else { return }
                 chatDraft = pending.text
-                if preview.searchWeb, let error = error as? DraftPolishError, case .http(let code) = error,
-                   [400, 402, 403, 404].contains(code) {
-                    showError("Groq отклонил веб-поиск (код \(code)). Проверьте доступ к поиску в Groq или выключите «Интернет» и повторите.")
-                } else {
+                switch (preview.searchWeb, error as? DraftPolishError) {
+                case (true, .http(400)):
+                    showError("Groq отклонил запрос с веб-поиском (код 400). Вопрос сохранён. Попробуйте уточнить, что нужно найти, и отправить снова.")
+                case (true, .http(402)), (true, .http(403)):
+                    showError("Groq не разрешил веб-поиск для этого запроса. Проверьте доступ к поиску в аккаунте Groq. Вопрос сохранён.")
+                default:
                     showError(error.localizedDescription)
                 }
             }

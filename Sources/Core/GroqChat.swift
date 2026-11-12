@@ -48,8 +48,8 @@ public enum GroqChat {
             payload["response_format"] = ["type": "json_object"]
         case .browserSearch:
             payload["tools"] = [["type": "browser_search"]]
-            payload["tool_choice"] = "required"
-            payload["citation_options"] = "enabled"
+            // Groq returns 400 with "required" if the model answers from the notes alone.
+            payload["tool_choice"] = "auto"
         }
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         guard data.count <= maxRequestBytes else { throw DraftPolishError.requestTooLarge }
