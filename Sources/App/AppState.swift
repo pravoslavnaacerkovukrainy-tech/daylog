@@ -86,6 +86,7 @@ struct NotePolishPreflight: Identifiable, Equatable {
 @MainActor
 final class AppState: ObservableObject {
     let store: DiaryStore
+    let focusTimer: FocusTimer
     private let ai: AIServices
 
     @Published private(set) var entries: [DiaryEntry] = []
@@ -144,6 +145,7 @@ final class AppState: ObservableObject {
 
     init(store: DiaryStore = DiaryStore(directory: DiaryStore.defaultDirectory()), ai: AIServices = .live) {
         self.store = store
+        self.focusTimer = FocusTimer(directory: store.directory)
         self.ai = ai
         do {
             try store.load()
@@ -210,6 +212,13 @@ final class AppState: ObservableObject {
         } catch {
             fail(error)
             return false
+        }
+    }
+
+    @discardableResult
+    func rescheduleTask(id: UUID, to day: Date) -> Bool {
+        changeOrganizer("День работы перенесён на \(DiaryFormat.shortDate(day))") {
+            _ = try store.rescheduleTask(id: id, to: day)
         }
     }
 

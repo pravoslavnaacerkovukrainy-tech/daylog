@@ -71,6 +71,9 @@ struct OrganizerView: View {
     @State private var reopening: DayPlan?
     @State private var deletingProject: DiaryProject?
     @State private var now = Date()
+    @State private var planDay: Date?
+    @State private var showPlanCalendar = false
+    @State private var movingTask: DayPlan?
 
     init(state: AppState) {
         self.state = state
@@ -79,6 +82,9 @@ struct OrganizerView: View {
     }
 
     private var current: OrganizerSection { section ?? .inbox }
+    private var selectedPlanDay: Date { planDay ?? now }
+    private var viewingToday: Bool { Calendar.current.isDate(selectedPlanDay, inSameDayAs: now) }
+    private var tomorrow: Date { shiftedDay(now, by: 1) }
     private var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private var visibleProjects: [DiaryProject] {
         state.projects.filter { scope.includes($0.area) && ($0.archived == showArchived) }
@@ -94,7 +100,7 @@ struct OrganizerView: View {
         switch current {
         case .inbox: return state.store.openTasks.filter { $0.taskStatus == .inbox }
         case .waiting: return state.store.waitingTasks()
-        case .today: return state.store.tasksForToday(now: now)
+        case .today: return state.store.tasksForDay(selectedPlanDay, now: now)
         case .review: return []
         case .projects, .all:
             return state.store.visibleTasks(showCompleted: showCompleted, showRemoved: showRemoved)
@@ -171,6 +177,9 @@ struct OrganizerView: View {
                                 area: sheet.area, status: sheet.status, plannedDay: sheet.plannedDay,
                                 chaosItem: sheet.chaosItem, atRisk: sheet.atRisk)
         }
+        .sheet(item: $movingTask) { task in
+            TaskRescheduleSheet(state: state, task: task, day: DiaryDay.date(task.day) ?? now)
+        }
         .sheet(item: $removingTask) { task in
             OrganizerTaskRemoval(state: state, task: task)
         }
@@ -207,7 +216,8 @@ struct OrganizerView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text(isSearching ? "Поиск" : current.rawValue).font(Theme.title)
+                Text(isSearching ? "Поиск" : current == .today && !viewingToday ? "План дня" : current.rawValue)
+                    .font(Theme.title)
                 Spacer()
                 Picker("Сфера", selection: $scope) {
                     ForEach(OrganizerArea.allCases) { Text($0.rawValue).tag($0) }
@@ -227,7 +237,51 @@ struct OrganizerView: View {
                         .disabled(state.isBlocked)
                 }
             }
+            if current == .today && !isSearching { dayNavigation }
         }.padding(24)
+    }
+
+    private var dayNavigation: some View {
+        HStack(spacing: 8) {
+            Button { selectPlanDay(shiftedDay(selectedPlanDay, by: -1)) } label: {
+                Image(systemName: "chevron.left").frame(width: 17)
+            }
+            .accessibilityLabel("Предыдущий день плана")
+            .help("Предыдущий день")
+            Button("Сегодня") { selectPlanDay(now) }
+            Button("Завтра") { selectPlanDay(tomorrow) }
+            Button { showPlanCalendar.toggle() } label: {
+                Label(DiaryFormat.shortDate(selectedPlanDay), systemImage: "calendar")
+                    .monospacedDigit()
+            }
+            .accessibilityLabel("Календарь плана")
+            .accessibilityValue(DiaryFormat.day(selectedPlanDay))
+            .help("Выбрать день плана")
+            .popover(isPresented: $showPlanCalendar, arrowEdge: .bottom) {
+                DatePicker("День плана", selection: Binding(get: { selectedPlanDay }, set: { day in
+                    selectPlanDay(day)
+                    showPlanCalendar = false
+                }), displayedComponents: .date)
+                .labelsHidden()
+                .datePickerStyle(.graphical)
+                .padding(12)
+            }
+            Button { selectPlanDay(shiftedDay(selectedPlanDay, by: 1)) } label: {
+                Image(systemName: "chevron.right").frame(width: 17)
+            }
+            .accessibilityLabel("Следующий день плана")
+            .help("Следующий день")
+        }
+        .controlSize(.small)
+    }
+
+    private func shiftedDay(_ date: Date, by offset: Int) -> Date {
+        Calendar.current.date(byAdding: .day, value: offset, to: date) ?? date
+    }
+
+    private func selectPlanDay(_ date: Date) {
+        let calendar = Calendar.current
+        planDay = calendar.isDate(date, inSameDayAs: now) ? nil : calendar.startOfDay(for: date)
     }
 
     @ViewBuilder private var content: some View {
@@ -288,7 +342,7 @@ struct OrganizerView: View {
                         .disabled(state.organizerCaptureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
                 }.padding(.horizontal, 24).padding(.vertical, 12)
             }
-            if current == .today, !urgentChaos.isEmpty {
+            if current == .today, viewingToday, !urgentChaos.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Не может ждать").font(Theme.groupTitle).foregroundStyle(Theme.signal)
                     ForEach(urgentChaos) { chaosRow($0) }
@@ -335,7 +389,7 @@ struct OrganizerView: View {
                 } else if !tasks.isEmpty {
                     Section("Задачи") { ForEach(tasks) { taskRow($0) } }
                 }
-                if current == .today, !suggestions.isEmpty {
+                if current == .today, viewingToday, !suggestions.isEmpty {
                     Section("Можно выбрать на сегодня") {
                         ForEach(Array(suggestions.prefix(5))) { task in
                             HStack {
@@ -344,7 +398,8 @@ struct OrganizerView: View {
                                     Text(task.taskArea.title).font(Theme.caption).foregroundStyle(Theme.quiet)
                                 }
                                 Spacer()
-                                Button("На сегодня") { scheduleToday(task) }.disabled(state.isBlocked)
+                                Button("На сегодня") { state.rescheduleTask(id: task.id, to: now) }
+                                    .disabled(state.isBlocked)
                             }.padding(.vertical, 5).accessibilityElement(children: .contain)
                         }
                     }
@@ -352,7 +407,7 @@ struct OrganizerView: View {
             }.listStyle(.inset)
                 .overlay {
                     if current == .today {
-                        if tasks.isEmpty && urgentChaos.isEmpty && suggestions.isEmpty { emptyState }
+                        if tasks.isEmpty && (!viewingToday || (urgentChaos.isEmpty && suggestions.isEmpty)) { emptyState }
                     } else if current == .review {
                         EmptyView()
                     } else if tasks.isEmpty && sortedChaos.isEmpty {
@@ -416,7 +471,7 @@ struct OrganizerView: View {
 
     private var emptyTitle: String {
         switch current {
-        case .today: return "Выберите, чем заняться сегодня"
+        case .today: return viewingToday ? "Выберите, чем заняться сегодня" : "На этот день задач нет"
         case .inbox: return "Сюда можно сбросить всё, что ещё не решено"
         case .waiting: return "Ожиданий пока нет"
         case .review: return "Пересмотр пока не требуется"
@@ -435,7 +490,10 @@ struct OrganizerView: View {
     /// Что можно выбрать на сегодня: открытые дела без назначенного дня.
     private var suggestions: [DayPlan] {
         _ = state.plans
-        return state.store.openTasks.filter { $0.day.isEmpty && $0.taskStatus == .ready && scope.includes($0.taskArea) }
+        let plannedIDs = Set(matchingTasks.map(\.id))
+        return state.store.openTasks.filter {
+            $0.day.isEmpty && $0.taskStatus == .ready && scope.includes($0.taskArea) && !plannedIDs.contains($0.id)
+        }
             .sorted(by: taskOrder)
     }
 
@@ -455,6 +513,17 @@ struct OrganizerView: View {
                         .onTapGesture { if task.isOpen { edit(task) } }
                     Spacer(minLength: 8)
                     if task.isOpen {
+                        Menu("Перенести") {
+                            Button("Сегодня") { state.rescheduleTask(id: task.id, to: now) }
+                            Button("Завтра") { state.rescheduleTask(id: task.id, to: tomorrow) }
+                            Button("Выбрать дату…") { movingTask = task }
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .font(Theme.caption)
+                        .disabled(state.isBlocked)
+                        .accessibilityLabel("Перенести задачу: \(task.text)")
+                        .help("Изменить день работы")
                         Button { edit(task) } label: { Image(systemName: "ellipsis").compactHitArea() }
                             .buttonStyle(.borderless).accessibilityLabel("Изменить задачу: \(task.text)")
                             .help("Изменить задачу")
@@ -495,10 +564,16 @@ struct OrganizerView: View {
                 }
                     .buttonStyle(.borderless).disabled(state.isBlocked)
                     .padding(.vertical, -4)
-                if !task.day.isEmpty { Text("День работы · \(task.day)").font(Theme.caption).foregroundStyle(Theme.quiet) }
-                if let deadline = task.organization?.deadline {
-                    Label("Срок · \(DiaryFormat.shortDate(deadline))", systemImage: "flag")
-                        .font(Theme.caption).foregroundStyle(Theme.quiet)
+                if !task.day.isEmpty || task.organization?.deadline != nil {
+                    HStack(spacing: 12) {
+                        if let workDay = DiaryDay.date(task.day) {
+                            Label("День работы · \(DiaryFormat.shortDate(workDay))", systemImage: "calendar")
+                        }
+                        if let deadline = task.organization?.deadline {
+                            Label("Срок · \(DiaryFormat.shortDate(deadline))", systemImage: "flag")
+                        }
+                    }
+                    .font(Theme.caption).foregroundStyle(Theme.quiet)
                 }
                 if let date = task.organization?.reviewDate, !task.isCompleted {
                     Label("Пересмотреть · \(DiaryFormat.shortDate(date))", systemImage: "arrow.triangle.2.circlepath")
@@ -511,7 +586,13 @@ struct OrganizerView: View {
                 Button(task.taskSteps.isEmpty ? "Разбить на шаги" : "Открыть шаги") { breakdownTask = task }
                 if task.isOpen {
                     Button("Изменить") { edit(task) }
-                    Button("Запланировать на сегодня") { scheduleToday(task) }
+                    Button("Начать фокус") { state.focusTimer.start(taskTitle: task.text) }
+                        .disabled(state.focusTimer.session != nil)
+                    Button("Перенести…") { movingTask = task }.disabled(state.isBlocked)
+                    if task.taskStatus == .inbox {
+                        Button("Запланировать на сегодня") { scheduleInboxTaskToday(task.id) }
+                            .disabled(state.isBlocked)
+                    }
                     Button(task.isAtRisk ? "Снять отметку «Обещание под угрозой»" : "Обещание под угрозой") {
                         state.changeOrganizer(task.isAtRisk ? "Отметка снята" : "Отмечено: обещание под угрозой") {
                             _ = try state.store.setTaskAtRisk(id: task.id, !task.isAtRisk)
@@ -692,7 +773,7 @@ struct OrganizerView: View {
     private func newTask(project: DiaryProject? = nil) {
         let status: TaskStatus = current == .waiting ? .waiting : .ready
         taskSheet = TaskSheet(projectID: project?.id, area: project?.area ?? scope.defaultArea,
-                              status: status, plannedDay: current == .today ? Date() : nil)
+                              status: status, plannedDay: current == .today ? selectedPlanDay : nil)
     }
     private func handleTaskCreationRequest() {
         guard state.taskCreationRequested else { return }
@@ -720,11 +801,15 @@ struct OrganizerView: View {
             _ = try state.store.addChaosItem(text: state.organizerCaptureText)
         }) { state.organizerCaptureText = "" }
     }
-    private func scheduleToday(_ task: DayPlan) {
-        var metadata = task.organization ?? TaskOrganization()
-        if metadata.status == .inbox { metadata.status = .ready }
+    private func scheduleInboxTaskToday(_ id: UUID) {
         state.changeOrganizer("Задача запланирована на сегодня") {
-            _ = try state.store.updateTask(id: task.id, text: task.text, plannedDay: Date(), organization: metadata)
+            guard let task = state.store.plan(id: id) else { throw DiaryError.notFound }
+            guard var metadata = task.organization, metadata.status == .inbox else {
+                _ = try state.store.rescheduleTask(id: id, to: now)
+                return
+            }
+            metadata.status = .ready
+            _ = try state.store.updateTask(id: id, text: task.text, plannedDay: now, organization: metadata)
         }
     }
     private func isReviewDue(_ date: Date?) -> Bool {
@@ -736,6 +821,43 @@ struct OrganizerView: View {
         if first.isOpen != second.isOpen { return first.isOpen }
         if first.createdAt != second.createdAt { return first.createdAt < second.createdAt }
         return first.id.uuidString < second.id.uuidString
+    }
+}
+
+private struct TaskRescheduleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var state: AppState
+    let task: DayPlan
+    @State var day: Date
+    @State private var error: String? = nil
+
+    init(state: AppState, task: DayPlan, day: Date) {
+        self.state = state
+        self.task = task
+        _day = State(initialValue: day)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Перенести задачу").font(Theme.title)
+            Text(task.text).foregroundStyle(Theme.ink).lineLimit(2)
+            DatePicker("Новый день работы", selection: $day, displayedComponents: .date)
+                .datePickerStyle(.graphical)
+            if let error { Text(error).font(Theme.caption).foregroundStyle(Theme.signal) }
+            HStack {
+                Spacer()
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Перенести") {
+                    if state.rescheduleTask(id: task.id, to: day) {
+                        dismiss()
+                    } else {
+                        error = state.errorMessage
+                    }
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 360)
     }
 }
 

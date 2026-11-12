@@ -16,7 +16,7 @@ xcrun swiftc \
   -target "$TARGET" \
   -module-name DaylogSelfTest \
   -o build/daylog-selftest \
-  Sources/Core/DiaryCore.swift Sources/Core/Organizer.swift Sources/Core/TaskSteps.swift Sources/Core/TaskBreakdown.swift Sources/Core/GroqChat.swift Sources/Core/DraftPolish.swift Sources/Core/NotePolish.swift Sources/Core/NotesChat.swift Sources/Core/DaySummary.swift Sources/Core/NoteMarkdown.swift Sources/Core/MarkdownFolderExport.swift Sources/App/AppState.swift Sources/App/GroqKeyStore.swift Sources/App/TaskBreakdownDraft.swift Tests/SelfTest/main.swift
+  Sources/Core/DiaryCore.swift Sources/Core/Organizer.swift Sources/Core/TaskSteps.swift Sources/Core/TaskBreakdown.swift Sources/Core/GroqChat.swift Sources/Core/DraftPolish.swift Sources/Core/NotePolish.swift Sources/Core/NotesChat.swift Sources/Core/DaySummary.swift Sources/Core/NoteMarkdown.swift Sources/Core/MarkdownFolderExport.swift Sources/App/AppState.swift Sources/App/FocusTimer.swift Sources/App/GroqKeyStore.swift Sources/App/TaskBreakdownDraft.swift Tests/SelfTest/main.swift
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/daylog-test.XXXXXX")"
 cleanup() { chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"; }

@@ -179,6 +179,9 @@ struct ContentView: View {
             .frame(width: 350)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
+            .overlay(alignment: .trailing) {
+                FocusTimerButton(timer: state.focusTimer).padding(.trailing, 24)
+            }
             Divider()
         }
         .background(Theme.pane)

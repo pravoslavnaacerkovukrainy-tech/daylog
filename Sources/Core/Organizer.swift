@@ -253,6 +253,23 @@ public extension DiaryStore {
         return copy[index]
     }
 
+    /// Меняет только день работы по актуальной версии задачи.
+    @discardableResult
+    func rescheduleTask(id: UUID, to day: Date, calendar: Calendar = .current, now: Date = Date()) throws -> DayPlan {
+        guard let index = plans.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        let task = plans[index]
+        guard !task.isCompleted else { throw DiaryError.planIsCompleted }
+        guard !task.isRemoved else { throw DiaryError.taskIsRemoved }
+        if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
+        let key = DiaryDay.key(day, calendar: calendar)
+        guard key != task.day else { return task }
+        var copy = plans
+        copy[index].day = key
+        copy[index].updatedAt = diaryNormalized(now)
+        try persist(entries: entries, plans: copy, notes: notes, projects: projects)
+        return copy[index]
+    }
+
     /// «Снять…»: причина обязательна. Снятие не считается выполнением и не пишет дневник.
     @discardableResult
     func setTaskRemoved(id: UUID, reason: String, now: Date = Date()) throws -> DayPlan {
@@ -491,6 +508,20 @@ public extension DiaryStore {
             if !task.day.isEmpty, task.day <= todayKey { return true }
             guard let deadline = task.organization?.deadline else { return false }
             return calendar.startOfDay(for: deadline) <= startOfToday
+        })
+    }
+
+    /// В другие дни видны назначенные задачи и сроки именно на выбранную дату.
+    func tasksForDay(_ day: Date, now: Date = Date(), calendar: Calendar = .current) -> [DayPlan] {
+        if calendar.isDate(day, inSameDayAs: now) {
+            return tasksForToday(now: now, calendar: calendar)
+        }
+        let key = DiaryDay.key(day, calendar: calendar)
+        return Self.sortedPlans(openTasks.filter { task in
+            guard task.taskStatus != .paused else { return false }
+            if task.day == key { return true }
+            guard let deadline = task.organization?.deadline else { return false }
+            return calendar.isDate(deadline, inSameDayAs: day)
         })
     }
 

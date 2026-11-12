@@ -1237,6 +1237,111 @@ test("Органайзер: входящие, ожидание и три нез�
     }
 }
 
+test("План на дату: день работы и срок дают одну строку, «Сегодня» сохраняет прежнюю выборку") {
+    let store = DiaryStore(directory: freshDir("plan-day")); try store.load()
+    let future = date(2030, 3, 13, 0, 0)
+    let other = date(2030, 3, 14, 0, 0)
+    let planned = try store.addTask(text: "Назначена", plannedDay: future, organization: TaskOrganization())
+    let due = try store.addTask(text: "Только срок", organization: TaskOrganization(deadline: future))
+    let both = try store.addTask(text: "Срок и работа", plannedDay: future, organization: TaskOrganization(deadline: future))
+    let overdue = try store.addTask(text: "Просрочена", plannedDay: day1, organization: TaskOrganization(deadline: day1))
+    let atRisk = try store.addTask(text: "Под угрозой", organization: TaskOrganization(status: .paused, atRisk: true))
+    let paused = try store.addTask(text: "Отложена", plannedDay: future, organization: TaskOrganization(status: .paused, deadline: future))
+    let removed = try store.addTask(text: "Снята", plannedDay: future, organization: TaskOrganization())
+    _ = try store.setTaskRemoved(id: removed.id, reason: "Больше не нужна")
+    let completed = try store.addTask(text: "Выполнена", plannedDay: future, organization: TaskOrganization())
+    _ = try store.completePlan(id: completed.id)
+    let actual = store.tasksForDay(future, now: day2).map(\.id)
+    check(Set(actual) == [planned.id, due.id, both.id] && actual.count == 3, "назначение и срок на дату без дублей")
+    check(!actual.contains(paused.id) && !actual.contains(removed.id) && !actual.contains(completed.id), "отложенные и закрытые исключены")
+    check(store.tasksForDay(other, now: day2).isEmpty, "пустой день остаётся пустым")
+    check(store.tasksForDay(day1, now: day2).map(\.id) == [overdue.id], "прошедший день использует точную дату")
+    let today = store.tasksForDay(day2, now: day2)
+    check(today == store.tasksForToday(now: day2) && Set(today.map(\.id)) == [overdue.id, atRisk.id],
+          "переключение обратно на сегодня возвращает просрочку и угрозу")
+}
+
+test("Перенос меняет только день работы и сохраняется после восстановления копии профиля") {
+    try MainActor.assumeIsolated {
+        let original = DiaryStore(directory: freshDir("plan-original")); try original.load()
+        let project = try original.saveProject(title: "Отчёт", outcome: "Расчёты проверены", area: .work,
+                                               uncertainty: "", reviewDate: nil)
+        let input = try original.addChaosItem(text: "Проверить расчёты", now: day1)
+        _ = try original.addChaosItem(text: "Следующая мысль")
+        _ = try original.addNote(title: "Исходные данные", body: "Пример")
+        _ = try original.add(text: "Получил материалы", context: nil)
+        let deadline = date(2030, 3, 15, 0, 0)
+        let metadata = TaskOrganization(area: .work, projectID: project.id, promisedTo: "Коллеге",
+                                        atRisk: true, reviewDate: day2, deadline: deadline, details: "Два расчёта")
+        let task = try original.makeTask(fromChaos: input.id, text: input.text, plannedDay: day1, organization: metadata)
+        try original.setNextAction(projectID: project.id, taskID: task.id)
+        let stepped = try original.replaceTaskSteps(parent: task, steps: [TaskStep(text: "Проверить формулу")])
+        let baseline = try Data(contentsOf: original.fileURL)
+        let sandbox = DiaryStore(directory: freshDir("plan-restored"))
+        try baseline.write(to: sandbox.fileURL)
+        let state = AppState(store: sandbox)
+        check(sandbox.plan(id: task.id) == stepped, "копия профиля загрузилась")
+        let monday = date(2030, 3, 18, 0, 0)
+        check(state.rescheduleTask(id: task.id, to: monday), "перенос через действие приложения")
+        var moved = try sandbox.rescheduleTask(id: task.id, to: monday)
+        check(moved.day == DiaryDay.key(monday) && state.plans.contains(where: { $0.id == task.id && $0.day == moved.day }),
+              "новый день виден в состоянии интерфейса")
+        moved.day = stepped.day
+        moved.updatedAt = stepped.updatedAt
+        check(moved == stepped && sandbox.projects == original.projects, "срок, пересмотр, обещание, шаги и связь с проектом сохранены")
+        check(sandbox.entries == original.entries && sandbox.notes == original.notes && sandbox.chaos == original.chaos,
+              "содержание остальных разделов сохранено")
+        let reopened = DiaryStore(directory: sandbox.directory); try reopened.load()
+        check(reopened.plan(id: task.id)?.day == DiaryDay.key(monday), "перенос пережил повторное открытие")
+        check(try Data(contentsOf: original.fileURL) == baseline, "исходный профиль остался доступен для восстановления")
+        _ = try reopened.setTaskRemoved(id: task.id, reason: "Проверка")
+        let error = expectError("снятая задача не переносится") { _ = try reopened.rescheduleTask(id: task.id, to: day1) }
+        check(error as? DiaryError == .taskIsRemoved, "ошибка соответствует состоянию задачи")
+    }
+}
+
+test("Помодоро: пауза, восстановление, переходы и длинный перерыв после четырёх отрезков") {
+    MainActor.assumeIsolated {
+        let directory = freshDir("focus-timer")
+        var signals = 0
+        let timer = FocusTimer(directory: directory, now: day1, signal: { signals += 1 })
+        timer.start(taskTitle: "Проверить расчёты", now: day1)
+        timer.start(taskTitle: "Другая задача", now: day1)
+        check(timer.secondsRemaining == 1_500 && timer.session?.taskTitle == "Проверить расчёты",
+              "запуск на 25 минут и защита активного сеанса")
+        timer.pause(now: day1.addingTimeInterval(30))
+        timer.refresh(now: day1.addingTimeInterval(600))
+        check(timer.secondsRemaining == 1_470 && timer.session?.deadline == nil, "в паузе время не убывает")
+        let resumed = FocusTimer(directory: directory, now: day2, signal: { signals += 1 })
+        check(resumed.secondsRemaining == 1_470 && resumed.session?.taskTitle == "Проверить расчёты",
+              "пауза и название задачи сохранились после открытия профиля")
+        resumed.resumeOrStartPhase(now: day2)
+        var time = day2.addingTimeInterval(1_470)
+        resumed.refresh(now: time)
+        check(resumed.session?.phase == .shortBreak && resumed.secondsRemaining == 300 && resumed.session?.deadline == nil,
+              "перерыв ждёт запуска")
+        resumed.refresh(now: time)
+        check(signals == 1, "сигнал по завершении звучит один раз")
+        for _ in 2...4 {
+            resumed.resumeOrStartPhase(now: time)
+            time = time.addingTimeInterval(300)
+            resumed.refresh(now: time)
+            resumed.resumeOrStartPhase(now: time)
+            time = time.addingTimeInterval(1_500)
+            resumed.refresh(now: time)
+        }
+        check(resumed.session?.phase == .longBreak && resumed.secondsRemaining == 900, "после четвёртого фокуса перерыв на 15 минут")
+        resumed.resumeOrStartPhase(now: time)
+        let reopened = FocusTimer(directory: directory, now: time.addingTimeInterval(901), signal: { signals += 1 })
+        check(reopened.session?.phase == .focus && reopened.session?.deadline == nil && signals == 7,
+              "после перезапуска истёкший перерыв завершён без позднего сигнала")
+        reopened.stop(now: time)
+        check(FocusTimer(directory: directory, now: time).session == nil, "завершение очищает состояние")
+        check(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("entries.json").path),
+              "таймер не записывает события в дневник")
+    }
+}
+
 test("Органайзер: проект, следующий шаг и удаление связей") {
     let store = DiaryStore(directory: freshDir("organizer-relations")); try store.load()
     let project = try store.saveProject(title: "Результат", outcome: "Готовый результат", area: .work, uncertainty: "", reviewDate: nil)
