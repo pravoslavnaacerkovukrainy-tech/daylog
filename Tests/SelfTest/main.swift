@@ -530,10 +530,10 @@ test("Документ: v2-файл читается как notes=[]") {
     let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
     check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
 }
-test("Документ: будущая версия 8 отвергается как неподдерживаемая") {
-    let future = #"{"format":"daylog","version":8,"entries":[],"notes":[]}"#.data(using: .utf8)!
-    let err = expectError("v8 не поддерживается") { _ = try DiaryJSON.decode(future) }
-    check((err as? DiaryError) == .unsupportedFormat("версия 8, приложение понимает версию до 7"), "сообщение про версию: \(String(describing: err))")
+test("Документ: будущая версия 9 отвергается как неподдерживаемая") {
+    let future = #"{"format":"daylog","version":9,"entries":[],"notes":[]}"#.data(using: .utf8)!
+    let err = expectError("v9 не поддерживается") { _ = try DiaryJSON.decode(future) }
+    check((err as? DiaryError) == .unsupportedFormat("версия 9, приложение понимает версию до 8"), "сообщение про версию: \(String(describing: err))")
 }
 
 test("Документ: версия 7 только при новых полях пересмотра") {
@@ -587,6 +587,70 @@ test("Заметки: поиск по title и body, без учёта реги�
     check(s.searchNotes("техник").count == 1, "по заголовку")
     check(s.searchNotes("сзі").count == 1, "по телу, регистр")
 }
+test("Папки заметок: прежний профиль, перенос, переименование, удаление и возврат") {
+    let directory = freshDir("note-folders")
+    let store = DiaryStore(directory: directory)
+    let old = try store.addNote(title: "Исходная заметка", body: "Формулировка", now: day1)
+    let baseline = try Data(contentsOf: store.fileURL)
+    let reopened = DiaryStore(directory: directory); try reopened.load()
+    check(reopened.noteFolders.isEmpty && reopened.notes == [old], "прежние заметки открываются без папок")
+    let folder = try reopened.addNoteFolder(name: "  Работа  ")
+    let other = try reopened.addNoteFolder(name: "Личное")
+    let version = try DiaryJSON.decode(Data(contentsOf: reopened.fileURL)).version
+    check(folder.name == "Работа" && version == 8, "папки хранятся в v8")
+    let backups = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        .filter { $0.lastPathComponent.hasPrefix("entries-before-note-folders-") }
+    let backup = try backups.first.map { try Data(contentsOf: $0) }
+    check(backups.count == 1 && backup == baseline, "создана точная копия прежнего профиля")
+    let duplicate = expectError("дубликат регистра не принимается") { _ = try reopened.addNoteFolder(name: "работа") }
+    check(duplicate as? DiaryError == .duplicateNoteFolderName, "понятная ошибка дубликата")
+    expectError("пустое название") { _ = try reopened.addNoteFolder(name: " \n ") }
+    expectError("отсутствующая папка") { try reopened.moveNote(id: old.id, to: UUID()) }
+    try reopened.moveNote(id: old.id, to: folder.id)
+    _ = try reopened.setPinned(id: old.id, true)
+    try reopened.renameNoteFolder(id: folder.id, name: "Рабочее")
+    let placed = try reopened.addNote(title: "Новая заметка", body: "Текст", folderID: other.id)
+    let result = DiaryStore(directory: directory); try result.load()
+    let restored = result.notes.first { $0.id == old.id }
+    check(restored?.folderID == folder.id && restored?.pinned == true && restored?.updatedAt == old.updatedAt,
+          "перенос и переименование сохраняют заметку, дату и закрепление")
+    check(result.searchNotes("формулировка").map(\.id) == [old.id], "общий поиск видит заметку в папке")
+    check(result.noteFolders.first(where: { $0.id == folder.id })?.name == "Рабочее", "название переживает перезапуск")
+    _ = try result.updateNote(id: old.id, title: old.title, body: "Изменённый текст")
+    check(result.notes.first(where: { $0.id == old.id })?.folderID == folder.id, "обычная правка оставляет папку")
+    let removed = try result.deleteNote(id: old.id)
+    try result.deleteNoteFolder(id: folder.id)
+    try result.restoreNote(removed)
+    try result.deleteNoteFolder(id: other.id)
+    let export = try DiaryStore.parseExportDocument(result.exportJSON())
+    check(export.noteFolders.isEmpty && Set(export.notes.map(\.id)) == [old.id, placed.id], "удаление папок сохраняет обе заметки")
+    check(export.notes.allSatisfy { $0.folderID == nil }, "возврат заметки и удаление её папки ведут в «Без папки»")
+}
+
+test("Папки заметок: экспорт сохраняет папки, ссылки и принадлежность") {
+    let store = DiaryStore(directory: freshDir("folder-export"))
+    let folder = try store.addNoteFolder(name: "../Анализ [архив] 📁")
+    let emptyFolder = try store.addNoteFolder(name: "Без записей")
+    let note = try store.addNote(title: "Материалы", body: "**Пример**", folderID: folder.id)
+    let plain = try store.addNote(title: "Старая", body: "Без папки")
+    let bundle = try store.exportMarkdownFolder(parentDirectory: freshDir("folder-export-target"), now: day1)
+    let paths = try fm.contentsOfDirectory(at: bundle.notesDirectoryURL, includingPropertiesForKeys: nil)
+    let directories = paths.filter { $0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+    check(directories.count == 2 && paths.contains(where: { $0.lastPathComponent == "\(plain.id.uuidString).md" }),
+          "обе тематические папки созданы, обычные заметки остались в корне")
+    if let saved = directories.first(where: { $0.lastPathComponent.hasSuffix(folder.id.uuidString) }) {
+        let text = try String(contentsOf: saved.appendingPathComponent("\(note.id.uuidString).md"), encoding: .utf8)
+        let index = try String(contentsOf: bundle.readmeURL, encoding: .utf8)
+        check(text.hasSuffix(note.body) && index.contains("Заметки/\(saved.lastPathComponent)/\(note.id.uuidString).md"),
+              "безопасный путь совпадает со ссылкой, содержимое сохранилось")
+    } else { check(false, "нет папки заметки") }
+    let restored = try DiaryStore.parseExportDocument(Data(contentsOf: bundle.archiveURL))
+    check(restored.noteFolders == [folder, emptyFolder] && restored.notes.first(where: { $0.id == note.id })?.folderID == folder.id,
+          "JSON хранит названия, идентификаторы и принадлежность")
+    let markdown = try store.exportMarkdown()
+    check(markdown.contains("Папка · ") && markdown.contains("Без записей"), "единый Markdown показывает названия папок")
+}
+
 test("Заметки: мутация на заблокированном хранилище отвергается") {
     let dir = freshDir("notes-blocked")
     try Data("не json".utf8).write(to: dir.appendingPathComponent("entries.json"))

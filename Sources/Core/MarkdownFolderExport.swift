@@ -57,9 +57,16 @@ public enum MarkdownFolderExport {
                 try Data(body.utf8).write(to: fileURL, options: .withoutOverwriting)
             }
 
+            var folderURLs: [UUID: URL] = [:]
+            for folder in store.noteFolders {
+                let folderURL = notesDirectory.appendingPathComponent(noteFolderDirectoryName(folder), isDirectory: true)
+                try fm.createDirectory(at: folderURL, withIntermediateDirectories: false)
+                folderURLs[folder.id] = folderURL
+            }
             for note in store.sortedNotes() {
                 let filename = "\(note.id.uuidString).md"
-                let fileURL = notesDirectory.appendingPathComponent(filename)
+                let directory = note.folderID.flatMap { folderURLs[$0] } ?? notesDirectory
+                let fileURL = directory.appendingPathComponent(filename)
                 let body = noteMarkdownFile(note: note, calendar: calendar)
                 try Data(body.utf8).write(to: fileURL, options: .withoutOverwriting)
             }
@@ -138,19 +145,35 @@ private func readmeText(store: DiaryStore, now: Date, calendar: Calendar) -> Str
     }
 
     out += "\n\n### Заметки\n"
+    let folders = Dictionary(uniqueKeysWithValues: store.noteFolders.map { ($0.id, $0) })
+    if !store.noteFolders.isEmpty {
+        out += "\nПапки\n"
+        for folder in store.noteFolders {
+            out += "- [\(markdownLinkLabel(folder.name))](Заметки/\(noteFolderDirectoryName(folder))/)\n"
+        }
+        out += "\n"
+    }
     if store.notes.isEmpty {
         out += "- В этом экспорте заметок нет.\n"
     } else {
         for note in store.sortedNotes() {
             let fileName = "\(note.id.uuidString).md"
             let label = note.title.isEmpty ? "Без заголовка" : note.title
-            out += "\n- [\(markdownLinkLabel(label))](Заметки/\(fileName))"
+            let prefix = note.folderID.flatMap { folders[$0] }.map { noteFolderDirectoryName($0) + "/" } ?? ""
+            out += "\n- [\(markdownLinkLabel(label))](Заметки/\(prefix)\(fileName))"
         }
     }
 
     out += "\n\n### Архив\n- [Архив.json](Архив.json) — полный JSON-архив дневника.\n"
     if store.hasOrganizerData { out += "\n- [Органайзер](Органайзер.md) — проекты, задачи, сроки и ожидания.\n" }
     return out + "\n"
+}
+
+private func noteFolderDirectoryName(_ folder: NoteFolder) -> String {
+    let stem = folder.name.unicodeScalars.prefix(40).map {
+        CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" ? String($0) : "-"
+    }.joined()
+    return "\(stem)-\(folder.id.uuidString)"
 }
 
 private func dayMarkdownFile(store: DiaryStore, key: String, calendar: Calendar) -> String {
@@ -303,7 +326,7 @@ private func offsetString(for timeZone: TimeZone, at date: Date) -> String {
     return String(format: "%@%02d:%02d", seconds >= 0 ? "+" : "-", hours, minutes)
 }
 
-private func markdownInlineText(_ text: String) -> String {
+func markdownInlineText(_ text: String) -> String {
     var out = text
         .replacingOccurrences(of: "&", with: "&amp;")
         .replacingOccurrences(of: "<", with: "&lt;")

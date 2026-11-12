@@ -630,18 +630,33 @@ extension Notification.Name {
 struct NotesView: View {
     @EnvironmentObject var state: AppState
     @State private var newNoteToken = UUID()
+    @State private var folderEdit: FolderEdit?
+    @State private var deletingFolder: NoteFolder?
     @FocusState private var searchFocused: Bool
+
+    private struct FolderEdit: Identifiable {
+        let id = UUID()
+        let folder: NoteFolder?
+    }
 
     private var isSearching: Bool {
         !state.noteSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var notes: [DiaryNote] {
-        isSearching ? state.noteSearchResults : state.sortedNotes
+        (isSearching ? state.noteSearchResults : state.sortedNotes).filter(state.noteScope.includes)
     }
 
     private var selectedNote: DiaryNote? {
         state.sortedNotes.first { $0.id == state.selectedNoteID }
+    }
+
+    private var currentFolder: NoteFolder? {
+        state.noteFolders.first { $0.id == state.noteScope.folderID }
+    }
+
+    private var scopeTitle: String {
+        currentFolder?.name ?? (state.noteScope == .unfiled ? "Без папки" : "Все заметки")
     }
 
     var body: some View {
@@ -651,13 +666,16 @@ struct NotesView: View {
                     .font(Theme.groupTitle)
                     .foregroundStyle(Theme.ink)
                     .accessibilityAddTraits(.isHeader)
+                folderNavigation
                 searchField
                 Button(action: newNote) {
                     Label("Новая заметка", systemImage: "plus")
                 }
                 .disabled(state.isBlocked)
                 if notes.isEmpty {
-                    Text(isSearching ? "Ничего не найдено." : "Идеи и мысли можно записать здесь — без привязки ко дню.")
+                    Text(isSearching ? "Ничего не найдено." : state.noteScope == .all
+                         ? "Здесь можно записывать идеи и мысли."
+                         : "Здесь пока нет заметок.")
                         .font(Theme.text)
                         .foregroundStyle(Theme.quiet)
                         .fixedSize(horizontal: false, vertical: true)
@@ -665,7 +683,8 @@ struct NotesView: View {
                 } else {
                     List(selection: $state.selectedNoteID) {
                         ForEach(notes) { note in
-                            NoteRow(note: note)
+                            NoteRow(note: note, folderName: state.noteScope == .all
+                                    ? state.noteFolders.first { $0.id == note.folderID }?.name : nil)
                                 .tag(note.id)
                         }
                     }
@@ -677,7 +696,7 @@ struct NotesView: View {
             .frame(minWidth: 240, idealWidth: 280, maxWidth: 340, maxHeight: .infinity, alignment: .top)
             .background(Theme.pane)
 
-            NoteEditor(state: state, note: selectedNote)
+            NoteEditor(state: state, note: selectedNote, folderID: state.noteScope.folderID)
                 .id(state.selectedNoteID?.uuidString ?? newNoteToken.uuidString)
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -688,6 +707,60 @@ struct NotesView: View {
             guard let source = notification.object as? AppState, source === state else { return }
             newNote()
         }
+        .sheet(item: $folderEdit) { edit in
+            NoteFolderEditor(state: state, folder: edit.folder) { folder in
+                if edit.folder == nil { selectScope(.folder(folder.id)) }
+            }
+        }
+        .confirmationDialog("Удалить папку?", isPresented: Binding(
+            get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } }
+        ), presenting: deletingFolder) { folder in
+            Button("Удалить папку", role: .destructive) { state.deleteNoteFolder(folder.id) }
+            Button("Отмена", role: .cancel) {}
+        } message: { folder in
+            Text("Заметки из папки «\(folder.name)» будут видны в разделе «Без папки».")
+        }
+    }
+
+    private var folderNavigation: some View {
+        HStack(spacing: 6) {
+            Menu {
+                Button("Все заметки") { selectScope(.all) }
+                Button("Без папки") { selectScope(.unfiled) }
+                if !state.noteFolders.isEmpty { Divider() }
+                ForEach(state.noteFolders) { folder in
+                    Button(folder.name) { selectScope(.folder(folder.id)) }
+                }
+                if let folder = currentFolder {
+                    Divider()
+                    Button("Переименовать папку…") { folderEdit = FolderEdit(folder: folder) }
+                        .disabled(state.isBlocked)
+                    Button("Удалить папку…", role: .destructive) { deletingFolder = folder }
+                        .disabled(state.isBlocked)
+                }
+            } label: {
+                Label(scopeTitle, systemImage: currentFolder == nil ? "folder" : "folder.fill")
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityLabel("Папки заметок")
+            .accessibilityValue(scopeTitle)
+            Button {
+                folderEdit = FolderEdit(folder: nil)
+            } label: {
+                Label("Новая папка", systemImage: "folder.badge.plus").labelStyle(.iconOnly)
+            }
+            .help("Создать тематическую папку")
+            .disabled(state.isBlocked)
+        }
+    }
+
+    private func selectScope(_ scope: NoteScope) {
+        guard state.noteScope != scope else { return }
+        state.noteScope = scope
+        state.noteSearchText = ""
+        if let selectedNote, scope.includes(selectedNote) { return }
+        newNote()
     }
 
     private var searchField: some View {
@@ -724,6 +797,7 @@ struct NotesView: View {
 
 struct NoteRow: View {
     let note: DiaryNote
+    let folderName: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -743,14 +817,64 @@ struct NoteRow: View {
                 .font(Theme.text)
                 .foregroundStyle(Theme.quiet)
                 .lineLimit(1)
-            Text(DiaryFormat.shortDate(note.updatedAt))
-                .font(Theme.caption)
-                .foregroundStyle(Theme.quiet)
+            HStack(spacing: 8) {
+                Text(DiaryFormat.shortDate(note.updatedAt))
+                if let folderName { Label(folderName, systemImage: "folder").lineLimit(1) }
+            }
+            .font(Theme.caption)
+            .foregroundStyle(Theme.quiet)
         }
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct NoteFolderEditor: View {
+    @ObservedObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var nameFocused: Bool
+    let folder: NoteFolder?
+    let onSave: (NoteFolder) -> Void
+    @State private var name: String
+    @State private var error: String?
+
+    init(state: AppState, folder: NoteFolder?, onSave: @escaping (NoteFolder) -> Void) {
+        self.state = state
+        self.folder = folder
+        self.onSave = onSave
+        _name = State(initialValue: folder?.name ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(folder == nil ? "Новая папка" : "Переименовать папку").font(Theme.title)
+            TextField("Название папки", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+            if let error { Text(error).font(Theme.caption).foregroundStyle(Theme.signal) }
+            HStack {
+                Spacer()
+                Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(folder == nil ? "Создать" : "Сохранить", action: save)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isBlocked)
+            }
+        }
+        .padding(24)
+        .frame(width: 360)
+        .onAppear { nameFocused = true }
+    }
+
+    private func save() {
+        if let folder {
+            guard state.renameNoteFolder(folder.id, to: name) else { error = state.errorMessage; return }
+        } else {
+            guard let created = state.addNoteFolder(name) else { error = state.errorMessage; return }
+            onSave(created)
+        }
+        dismiss()
     }
 }
 
@@ -770,6 +894,7 @@ struct NoteEditor: View {
     /// title/text от него отличаются - любая правка после «Сохранить», включая отмену оформления.
     @State private var savedTitle: String
     @State private var savedText: String
+    @State private var draftFolderID: UUID?
     /// Режим только для показа: переключение ничего не сохраняет и не трогает черновик.
     @State private var mode: Mode = .editor
     @FocusState private var focus: Field?
@@ -777,7 +902,7 @@ struct NoteEditor: View {
     private enum Field: Hashable { case title, body }
     private enum Mode: Hashable { case editor, preview }
 
-    init(state: AppState, note: DiaryNote?) {
+    init(state: AppState, note: DiaryNote?, folderID: UUID?) {
         self.state = state
         self.note = note
         _title = State(initialValue: note?.title ?? "")
@@ -785,6 +910,7 @@ struct NoteEditor: View {
         _persistedID = State(initialValue: note?.id)
         _savedTitle = State(initialValue: note?.title ?? "")
         _savedText = State(initialValue: note?.body ?? "")
+        _draftFolderID = State(initialValue: folderID)
     }
 
 
@@ -804,6 +930,8 @@ struct NoteEditor: View {
                 .focused($focus, equals: .title)
                 .accessibilityLabel("Заголовок заметки")
                 .disabled(polishBusy || state.isBlocked)
+
+            if !state.noteFolders.isEmpty { folderMenu }
 
             HStack(alignment: .center, spacing: 8) {
                 Text("Текст заметки (Markdown)")
@@ -893,6 +1021,33 @@ struct NoteEditor: View {
         }
     }
 
+    private var folderMenu: some View {
+        let id = persistedID == nil ? draftFolderID : note?.folderID
+        let folder = state.noteFolders.first { $0.id == id }
+        return Menu {
+            Button("Без папки") { chooseFolder(nil) }
+            ForEach(state.noteFolders) { folder in
+                Button(folder.name) { chooseFolder(folder.id) }
+            }
+        } label: {
+            Label(folder?.name ?? "Без папки", systemImage: "folder")
+                .lineLimit(1)
+        }
+        .accessibilityLabel("Папка заметки")
+        .accessibilityValue(folder?.name ?? "Без папки")
+        .help(persistedID == nil ? "Выбрать папку для заметки" : "Переместить заметку")
+        .disabled(polishBusy || state.isBlocked)
+    }
+
+    private func chooseFolder(_ id: UUID?) {
+        if let persistedID {
+            guard note?.folderID != id else { return }
+            _ = state.moveNote(persistedID, to: id)
+        } else {
+            draftFolderID = id
+        }
+    }
+
     @ViewBuilder
     private var polishControls: some View {
         HStack(spacing: 8) {
@@ -953,7 +1108,13 @@ struct NoteEditor: View {
         let wasNew = persistedID == nil
         guard write(title: title, body: text) else { return }
         beforePolish = nil
-        if wasNew, let id = persistedID { state.selectedNoteID = id }
+        if wasNew, let id = persistedID {
+            if state.noteScope != .all, let note = state.notes.first(where: { $0.id == id }), !state.noteScope.includes(note) {
+                state.noteScope = note.folderID.map(NoteScope.folder) ?? .unfiled
+                state.noteSearchText = ""
+            }
+            state.selectedNoteID = id
+        }
     }
 
     /// Пишет текущий черновик: update, если заметка уже есть (исходная или созданная этим редактором),
@@ -965,7 +1126,8 @@ struct NoteEditor: View {
             ok = state.updateNote(id: id, title: draftTitle, body: draftText)
         } else {
             let previousIDs = Set(state.sortedNotes.map(\.id))
-            ok = state.addNote(title: draftTitle, body: draftText)
+            let folderID = state.noteFolders.first { $0.id == draftFolderID }?.id
+            ok = state.addNote(title: draftTitle, body: draftText, folderID: folderID)
             if ok { persistedID = state.sortedNotes.first { !previousIDs.contains($0.id) }?.id }
         }
         if ok {

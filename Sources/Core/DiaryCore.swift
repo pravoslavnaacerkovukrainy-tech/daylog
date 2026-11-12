@@ -66,16 +66,23 @@ public struct DiaryNote: Codable, Identifiable, Equatable, Hashable {
     public var updatedAt: Date
     /// Закреплённые показываются выше остальных.
     public var pinned: Bool
+    public var folderID: UUID?
 
     public init(id: UUID = UUID(), title: String, body: String,
-                createdAt: Date, updatedAt: Date, pinned: Bool = false) {
+                createdAt: Date, updatedAt: Date, pinned: Bool = false, folderID: UUID? = nil) {
         self.id = id
         self.title = title
         self.body = body
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.pinned = pinned
+        self.folderID = folderID
     }
+}
+
+public struct NoteFolder: Codable, Identifiable, Equatable, Hashable {
+    public let id: UUID
+    public var name: String
 }
 
 /// Ключ календарного дня без часовых поясов в файле: «2030-03-10».
@@ -116,7 +123,7 @@ public struct ChaosItem: Codable, Identifiable, Equatable, Hashable {
 
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     public var format: String
     public var version: Int
@@ -126,9 +133,10 @@ public struct DiaryDocument: Codable {
     public var notes: [DiaryNote]
     public var projects: [DiaryProject]
     public var chaos: [ChaosItem]
+    public var noteFolders: [NoteFolder]
 
     public init(entries: [DiaryEntry], plans: [DayPlan] = [], notes: [DiaryNote] = [], exportedAt: Date? = nil,
-                projects: [DiaryProject] = [], chaos: [ChaosItem] = []) {
+                projects: [DiaryProject] = [], chaos: [ChaosItem] = [], noteFolders: [NoteFolder] = []) {
         self.format = DiaryDocument.formatName
         self.exportedAt = exportedAt
         self.entries = entries
@@ -136,11 +144,12 @@ public struct DiaryDocument: Codable {
         self.notes = notes
         self.projects = projects
         self.chaos = chaos
+        self.noteFolders = noteFolders
         let needsV2 = !plans.isEmpty || entries.contains { $0.planID != nil }
         let needsV3 = !notes.isEmpty
         let needsV4 = !projects.isEmpty || plans.contains { $0.organization != nil || $0.day.isEmpty }
         let base = plans.contains { $0.steps != nil } ? 5 : (needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1)))
-        self.version = Self.needsReviewFields(plans) ? 7 : (chaos.isEmpty ? base : 6)
+        self.version = !noteFolders.isEmpty ? 8 : (Self.needsReviewFields(plans) ? 7 : (chaos.isEmpty ? base : 6))
     }
 
     /// Версия 7 поднимается только реальными данными пересмотра, а не самим фактом блока полей.
@@ -157,7 +166,7 @@ public struct DiaryDocument: Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case format, version, exportedAt, entries, plans, notes, projects, chaos
+        case format, version, exportedAt, entries, plans, notes, projects, chaos, noteFolders
     }
 
     public init(from decoder: Decoder) throws {
@@ -170,6 +179,11 @@ public struct DiaryDocument: Codable {
         notes = try c.decodeIfPresent([DiaryNote].self, forKey: .notes) ?? []
         projects = try c.decodeIfPresent([DiaryProject].self, forKey: .projects) ?? []
         chaos = try c.decodeIfPresent([ChaosItem].self, forKey: .chaos) ?? []
+        noteFolders = try c.decodeIfPresent([NoteFolder].self, forKey: .noteFolders) ?? []
+        let folderIDs = Set(noteFolders.map(\.id))
+        guard folderIDs.count == noteFolders.count, notes.compactMap(\.folderID).allSatisfy(folderIDs.contains) else {
+            throw DecodingError.dataCorruptedError(forKey: .noteFolders, in: c, debugDescription: "Недействительные ссылки на папки заметок")
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -182,6 +196,7 @@ public struct DiaryDocument: Codable {
         if !notes.isEmpty { try c.encode(notes, forKey: .notes) }
         if !projects.isEmpty { try c.encode(projects, forKey: .projects) }
         if !chaos.isEmpty { try c.encode(chaos, forKey: .chaos) }
+        if !noteFolders.isEmpty { try c.encode(noteFolders, forKey: .noteFolders) }
     }
 }
 
@@ -201,6 +216,9 @@ public enum DiaryError: Error, LocalizedError, Equatable {
     case emptyRemovalReason
     case taskIsRemoved
     case taskIsNotRemoved
+    case invalidNoteFolderName
+    case duplicateNoteFolderName
+    case noteFolderNotFound
 
     public var errorDescription: String? {
         switch self {
@@ -230,6 +248,12 @@ public enum DiaryError: Error, LocalizedError, Equatable {
             return "Снятую задачу нельзя изменить или выполнить. Сначала верните её в работу."
         case .taskIsNotRemoved:
             return "Эта задача не снята."
+        case .invalidNoteFolderName:
+            return "Введите название папки одной строкой, до 120 знаков."
+        case .duplicateNoteFolderName:
+            return "Папка с таким названием уже есть."
+        case .noteFolderNotFound:
+            return "Папка заметок не найдена."
         }
     }
 }
@@ -342,6 +366,7 @@ public final class DiaryStore {
     public private(set) var entries: [DiaryEntry] = []
     public private(set) var plans: [DayPlan] = []
     public private(set) var notes: [DiaryNote] = []
+    public private(set) var noteFolders: [NoteFolder] = []
     public private(set) var projects: [DiaryProject] = []
     public private(set) var chaos: [ChaosItem] = []
     public private(set) var blockReason: String?
@@ -372,6 +397,7 @@ public final class DiaryStore {
             entries = []
             plans = []
             notes = []
+            noteFolders = []
             projects = []
             chaos = []
             return
@@ -387,6 +413,7 @@ public final class DiaryStore {
             entries = DiaryStore.sorted(doc.entries)
             plans = DiaryStore.sortedPlans(doc.plans)
             notes = DiaryStore.sortNotesCanonical(doc.notes)
+            noteFolders = doc.noteFolders
             projects = doc.projects
             chaos = doc.chaos
             loadedData = data
@@ -394,6 +421,7 @@ public final class DiaryStore {
             entries = []
             plans = []
             notes = []
+            noteFolders = []
             projects = []
             chaos = []
             let diaryError = (error as? DiaryError) ?? DiaryError.unreadable(error.localizedDescription)
@@ -404,13 +432,15 @@ public final class DiaryStore {
 
     /// Единственная точка записи: записи, планы и заметки пишутся одним атомарным файлом.
     func persist(entries newEntries: [DiaryEntry], plans newPlans: [DayPlan], notes newNotes: [DiaryNote],
-                 projects newProjects: [DiaryProject]? = nil, chaos newChaos: [ChaosItem]? = nil) throws {
+                 projects newProjects: [DiaryProject]? = nil, chaos newChaos: [ChaosItem]? = nil,
+                 noteFolders newNoteFolders: [NoteFolder]? = nil) throws {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
         let sortedEntries = DiaryStore.sorted(newEntries)
         let sortedPlans = DiaryStore.sortedPlans(newPlans)
         let sortedNotes = DiaryStore.sortNotesCanonical(newNotes)
         var projectCopy = newProjects ?? projects
         let chaosCopy = newChaos ?? chaos
+        let foldersCopy = newNoteFolders ?? noteFolders
         for index in projectCopy.indices {
             if let id = projectCopy[index].nextActionID,
                !sortedPlans.contains(where: { $0.id == id && $0.projectID == projectCopy[index].id && !$0.isCompleted && $0.taskStatus == .ready }) {
@@ -418,7 +448,8 @@ public final class DiaryStore {
             }
         }
         do {
-            let document = DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes, projects: projectCopy, chaos: chaosCopy)
+            let document = DiaryDocument(entries: sortedEntries, plans: sortedPlans, notes: sortedNotes,
+                                         projects: projectCopy, chaos: chaosCopy, noteFolders: foldersCopy)
             let data = try DiaryJSON.encoder().encode(document)
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
             let lockPath = directory.appendingPathComponent(".entries.lock").path
@@ -428,21 +459,14 @@ public final class DiaryStore {
             guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw DiaryError.writeFailed("другой экземпляр сохраняет данные; повторите сохранение") }
             let diskData = fm.fileExists(atPath: fileURL.path) ? try Data(contentsOf: fileURL) : nil
             guard diskData == loadedData else { throw DiaryError.conflictingChanges }
-            if document.version >= 4, let original = loadedData, try DiaryJSON.decode(original).version < 4 {
-                let backup = directory.appendingPathComponent("entries-before-organizer-\(UUID().uuidString).json")
-                try original.write(to: backup, options: .withoutOverwriting)
-            }
-            if document.version >= 5, let original = loadedData, try DiaryJSON.decode(original).version < 5 {
-                let backup = directory.appendingPathComponent("entries-before-steps-\(UUID().uuidString).json")
-                try original.write(to: backup, options: .withoutOverwriting)
-            }
-            if document.version >= 6, let original = loadedData, try DiaryJSON.decode(original).version < 6 {
-                let backup = directory.appendingPathComponent("entries-before-chaos-\(UUID().uuidString).json")
-                try original.write(to: backup, options: .withoutOverwriting)
-            }
-            if document.version >= 7, let original = loadedData, try DiaryJSON.decode(original).version < 7 {
-                let backup = directory.appendingPathComponent("entries-before-review-\(UUID().uuidString).json")
-                try original.write(to: backup, options: .withoutOverwriting)
+            if let original = loadedData {
+                let oldVersion = try DiaryJSON.decode(original).version
+                let migrations = document.version == 8 ? [(8, "note-folders")]
+                    : [(4, "organizer"), (5, "steps"), (6, "chaos"), (7, "review")]
+                for (version, name) in migrations where oldVersion < version && version <= document.version {
+                    let backup = directory.appendingPathComponent("entries-before-\(name)-\(UUID().uuidString).json")
+                    try original.write(to: backup, options: .withoutOverwriting)
+                }
             }
             try data.write(to: fileURL, options: .atomic)
             loadedData = data
@@ -454,6 +478,7 @@ public final class DiaryStore {
         entries = sortedEntries
         plans = sortedPlans
         notes = sortedNotes
+        noteFolders = foldersCopy
         projects = projectCopy
         chaos = chaosCopy
     }
@@ -734,11 +759,12 @@ public final class DiaryStore {
     }
 
     @discardableResult
-    public func addNote(title: String, body: String, now: Date = Date()) throws -> DiaryNote {
+    public func addNote(title: String, body: String, folderID: UUID? = nil, now: Date = Date()) throws -> DiaryNote {
         let b = DiaryStore.cleanText(body)
         guard !b.isEmpty else { throw DiaryError.emptyText }
+        if let folderID, !noteFolders.contains(where: { $0.id == folderID }) { throw DiaryError.noteFolderNotFound }
         let n = diaryNormalized(now)
-        let note = DiaryNote(title: DiaryStore.cleanTitle(title), body: b, createdAt: n, updatedAt: n)
+        let note = DiaryNote(title: DiaryStore.cleanTitle(title), body: b, createdAt: n, updatedAt: n, folderID: folderID)
         try persist(entries: entries, plans: plans, notes: notes + [note])
         return note
     }
@@ -778,7 +804,11 @@ public final class DiaryStore {
     /// Возврат только что удалённой заметки («Вернуть»).
     public func restoreNote(_ note: DiaryNote) throws {
         guard !notes.contains(where: { $0.id == note.id }) else { return }
-        try persist(entries: entries, plans: plans, notes: notes + [note])
+        var restored = note
+        if let folderID = restored.folderID, !noteFolders.contains(where: { $0.id == folderID }) {
+            restored.folderID = nil
+        }
+        try persist(entries: entries, plans: plans, notes: notes + [restored])
     }
 
     /// Поиск по заголовку и телу, без учёта регистра и диакритики; порядок — как в интерфейсе.
@@ -792,11 +822,57 @@ public final class DiaryStore {
         }
     }
 
+    // MARK: Note folders
+
+    public func addNoteFolder(name: String) throws -> NoteFolder {
+        let folder = NoteFolder(id: UUID(), name: try checkedNoteFolderName(name))
+        try persist(entries: entries, plans: plans, notes: notes, noteFolders: noteFolders + [folder])
+        return folder
+    }
+
+    public func renameNoteFolder(id: UUID, name: String) throws {
+        guard let index = noteFolders.firstIndex(where: { $0.id == id }) else { throw DiaryError.noteFolderNotFound }
+        var folders = noteFolders
+        folders[index].name = try checkedNoteFolderName(name, excluding: id)
+        try persist(entries: entries, plans: plans, notes: notes, noteFolders: folders)
+    }
+
+    public func deleteNoteFolder(id: UUID) throws {
+        guard noteFolders.contains(where: { $0.id == id }) else { throw DiaryError.noteFolderNotFound }
+        var remainingNotes = notes
+        for index in remainingNotes.indices where remainingNotes[index].folderID == id {
+            remainingNotes[index].folderID = nil
+        }
+        try persist(entries: entries, plans: plans, notes: remainingNotes, noteFolders: noteFolders.filter { $0.id != id })
+    }
+
+    public func moveNote(id: UUID, to folderID: UUID?) throws {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { throw DiaryError.notFound }
+        if let folderID, !noteFolders.contains(where: { $0.id == folderID }) { throw DiaryError.noteFolderNotFound }
+        guard notes[index].folderID != folderID else { return }
+        var remainingNotes = notes
+        remainingNotes[index].folderID = folderID
+        try persist(entries: entries, plans: plans, notes: remainingNotes)
+    }
+
+    private func checkedNoteFolderName(_ raw: String, excluding id: UUID? = nil) throws -> String {
+        let name = Self.cleanTitle(raw)
+        guard (1...120).contains(name.count), name.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw DiaryError.invalidNoteFolderName
+        }
+        guard !noteFolders.contains(where: {
+            $0.id != id && $0.name.compare(name, options: [.caseInsensitive, .diacriticInsensitive], locale: DiaryFormat.ru) == .orderedSame
+        }) else { throw DiaryError.duplicateNoteFolderName }
+        return name
+    }
+
     // MARK: Export
 
     public func exportJSON(now: Date = Date()) throws -> Data {
         if let reason = blockReason { throw DiaryError.storeBlocked(reason) }
-        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes, exportedAt: diaryNormalized(now), projects: projects, chaos: chaos))
+        return try DiaryJSON.encoder().encode(DiaryDocument(entries: entries, plans: plans, notes: notes,
+                                                           exportedAt: diaryNormalized(now), projects: projects, chaos: chaos,
+                                                           noteFolders: noteFolders))
     }
 
     public static func parseExport(_ data: Data) throws -> [DiaryEntry] {
@@ -843,12 +919,19 @@ public final class DiaryStore {
             }
         }
         if hasOrganizerData { out += "\n" + organizerMarkdown(calendar: calendar) }
-        if !notes.isEmpty {
+        if !notes.isEmpty || !noteFolders.isEmpty {
             out += "\n## Заметки\n"
+            let folderNames = Dictionary(uniqueKeysWithValues: noteFolders.map { ($0.id, $0.name) })
+            if !noteFolders.isEmpty {
+                out += "\nПапки\n"
+                for folder in noteFolders { out += "- \(markdownInlineText(folder.name))\n" }
+            }
             for n in sortedNotes() {
                 let rawTitle = n.title.isEmpty ? "Без заголовка" : n.title
                 let title = rawTitle.replacingOccurrences(of: "\n", with: " ")
-                out += "\n### \(title)\(n.pinned ? " 📌" : "")\n\n\(DiaryStore.escapeMarkdownBody(n.body))\n"
+                out += "\n### \(title)\(n.pinned ? " 📌" : "")\n\n"
+                if let id = n.folderID, let name = folderNames[id] { out += "Папка · \(markdownInlineText(name))\n\n" }
+                out += "\(DiaryStore.escapeMarkdownBody(n.body))\n"
             }
         }
         return out

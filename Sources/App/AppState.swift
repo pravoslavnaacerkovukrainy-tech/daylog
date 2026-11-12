@@ -15,6 +15,19 @@ enum AppMode: Hashable {
     case ask
 }
 
+enum NoteScope: Hashable {
+    case all, unfiled, folder(UUID)
+
+    var folderID: UUID? {
+        if case .folder(let id) = self { return id }
+        return nil
+    }
+
+    func includes(_ note: DiaryNote) -> Bool {
+        self == .all || note.folderID == folderID
+    }
+}
+
 /// Последнее действие, которое можно отменить кнопкой в строке состояния.
 enum UndoAction: Equatable {
     case restoreEntry(DiaryEntry)
@@ -92,6 +105,7 @@ final class AppState: ObservableObject {
     @Published private(set) var entries: [DiaryEntry] = []
     @Published private(set) var plans: [DayPlan] = []
     @Published private(set) var notes: [DiaryNote] = []
+    @Published private(set) var noteFolders: [NoteFolder] = []
     @Published private(set) var projects: [DiaryProject] = []
     @Published private(set) var chaos: [ChaosItem] = []
     private var breakdownDrafts: [UUID: TaskBreakdownDraft] = [:]
@@ -134,6 +148,7 @@ final class AppState: ObservableObject {
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
+    @Published var noteScope: NoteScope = .all
     @Published var selectedNoteID: UUID?
     @Published var errorMessage: String?
     @Published var statusMessage: String?
@@ -193,6 +208,7 @@ final class AppState: ObservableObject {
         entries = store.entries
         plans = store.plans
         notes = store.notes
+        noteFolders = store.noteFolders.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         projects = store.projects
         chaos = store.chaos
         // Обновление происходит после мутации хранилища, вне вычисления SwiftUI body.
@@ -406,9 +422,9 @@ final class AppState: ObservableObject {
     // MARK: Note mutations
 
     @discardableResult
-    func addNote(title: String, body: String) -> Bool {
+    func addNote(title: String, body: String, folderID: UUID? = nil) -> Bool {
         do {
-            _ = try store.addNote(title: title, body: body)
+            _ = try store.addNote(title: title, body: body, folderID: folderID)
             refresh()
             undo = nil
             saved("Заметка сохранена")
@@ -453,6 +469,31 @@ final class AppState: ObservableObject {
         } catch {
             fail(error)
         }
+    }
+
+    func addNoteFolder(_ name: String) -> NoteFolder? {
+        var folder: NoteFolder?
+        changeOrganizer("Папка создана") { folder = try store.addNoteFolder(name: name) }
+        return folder
+    }
+
+    func renameNoteFolder(_ id: UUID, to name: String) -> Bool {
+        changeOrganizer("Папка переименована") { try store.renameNoteFolder(id: id, name: name) }
+    }
+
+    func deleteNoteFolder(_ id: UUID) {
+        if changeOrganizer("Папка удалена", { try store.deleteNoteFolder(id: id) }), noteScope == .folder(id) {
+            noteScope = .unfiled
+        }
+    }
+
+    func moveNote(_ id: UUID, to folderID: UUID?) -> Bool {
+        guard changeOrganizer("Заметка перемещена", { try store.moveNote(id: id, to: folderID) }) else { return false }
+        if noteScope != .all {
+            noteScope = folderID.map(NoteScope.folder) ?? .unfiled
+            noteSearchText = ""
+        }
+        return true
     }
 
     /// «Оформить» в редакторе заметки, шаг 1: только показать, что уйдёт в Groq. Сети нет.
@@ -648,6 +689,7 @@ final class AppState: ObservableObject {
 
     func openSource(_ id: UUID) {
         mode = .notes
+        noteScope = .all
         noteSearchText = ""
         selectedNoteID = id
     }
