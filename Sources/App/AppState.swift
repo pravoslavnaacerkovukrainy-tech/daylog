@@ -150,6 +150,7 @@ final class AppState: ObservableObject {
     @Published var noteSearchText: String = ""
     @Published var noteScope: NoteScope = .all
     @Published var selectedNoteID: UUID?
+    @Published private(set) var newNoteRequested = false
     @Published var errorMessage: String?
     @Published var statusMessage: String?
     @Published var undo: UndoAction?
@@ -471,9 +472,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    func addNoteFolder(_ name: String) -> NoteFolder? {
+    var noteFoldersByID: [UUID: NoteFolder] {
+        Dictionary(uniqueKeysWithValues: noteFolders.map { ($0.id, $0) })
+    }
+
+    func requestNewNote() {
+        selectedNoteID = nil
+        noteSearchText = ""
+        newNoteRequested = true
+        mode = .notes
+    }
+
+    func consumeNewNoteRequest() { newNoteRequested = false }
+
+    func addNoteFolder(_ name: String, parentID: UUID? = nil) -> NoteFolder? {
         var folder: NoteFolder?
-        changeOrganizer("Папка создана") { folder = try store.addNoteFolder(name: name) }
+        changeOrganizer("Папка создана") { folder = try store.addNoteFolder(name: name, parentID: parentID) }
         return folder
     }
 
@@ -481,9 +495,14 @@ final class AppState: ObservableObject {
         changeOrganizer("Папка переименована") { try store.renameNoteFolder(id: id, name: name) }
     }
 
+    func moveNoteFolder(_ id: UUID, to parentID: UUID?) -> Bool {
+        changeOrganizer("Папка перемещена") { try store.moveNoteFolder(id: id, to: parentID) }
+    }
+
     func deleteNoteFolder(_ id: UUID) {
+        let parentID = noteFolders.first(where: { $0.id == id })?.parentID
         if changeOrganizer("Папка удалена", { try store.deleteNoteFolder(id: id) }), noteScope == .folder(id) {
-            noteScope = .unfiled
+            noteScope = parentID.map(NoteScope.folder) ?? .unfiled
         }
     }
 

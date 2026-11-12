@@ -83,6 +83,17 @@ public struct DiaryNote: Codable, Identifiable, Equatable, Hashable {
 public struct NoteFolder: Codable, Identifiable, Equatable, Hashable {
     public let id: UUID
     public var name: String
+    public var parentID: UUID? = nil
+
+    static func path(to id: UUID, in folders: [UUID: NoteFolder]) -> [NoteFolder] {
+        var path: [NoteFolder] = []
+        var next = folders[id]
+        while let folder = next, path.count < folders.count {
+            path.append(folder)
+            next = folder.parentID.flatMap { folders[$0] }
+        }
+        return path.reversed()
+    }
 }
 
 /// Ключ календарного дня без часовых поясов в файле: «2030-03-10».
@@ -123,7 +134,7 @@ public struct ChaosItem: Codable, Identifiable, Equatable, Hashable {
 
 public struct DiaryDocument: Codable {
     public static let formatName = "daylog"
-    public static let currentVersion = 8
+    public static let currentVersion = 9
 
     public var format: String
     public var version: Int
@@ -149,7 +160,11 @@ public struct DiaryDocument: Codable {
         let needsV3 = !notes.isEmpty
         let needsV4 = !projects.isEmpty || plans.contains { $0.organization != nil || $0.day.isEmpty }
         let base = plans.contains { $0.steps != nil } ? 5 : (needsV4 ? 4 : (needsV3 ? 3 : (needsV2 ? 2 : 1)))
-        self.version = !noteFolders.isEmpty ? 8 : (Self.needsReviewFields(plans) ? 7 : (chaos.isEmpty ? base : 6))
+        if noteFolders.contains(where: { $0.parentID != nil }) {
+            self.version = 9
+        } else {
+            self.version = !noteFolders.isEmpty ? 8 : (Self.needsReviewFields(plans) ? 7 : (chaos.isEmpty ? base : 6))
+        }
     }
 
     /// Версия 7 поднимается только реальными данными пересмотра, а не самим фактом блока полей.
@@ -183,6 +198,17 @@ public struct DiaryDocument: Codable {
         let folderIDs = Set(noteFolders.map(\.id))
         guard folderIDs.count == noteFolders.count, notes.compactMap(\.folderID).allSatisfy(folderIDs.contains) else {
             throw DecodingError.dataCorruptedError(forKey: .noteFolders, in: c, debugDescription: "Недействительные ссылки на папки заметок")
+        }
+        let children = Dictionary(grouping: noteFolders, by: \.parentID)
+        var pending = children[nil] ?? []
+        let rootCount = pending.count
+        var visited = 0
+        while let folder = pending.popLast() {
+            visited += 1
+            pending.append(contentsOf: children[folder.id] ?? [])
+        }
+        guard visited == noteFolders.count, version >= 9 || rootCount == noteFolders.count else {
+            throw DecodingError.dataCorruptedError(forKey: .noteFolders, in: c, debugDescription: "Недействительное дерево папок заметок")
         }
     }
 
@@ -219,6 +245,7 @@ public enum DiaryError: Error, LocalizedError, Equatable {
     case invalidNoteFolderName
     case duplicateNoteFolderName
     case noteFolderNotFound
+    case invalidNoteFolderMove
 
     public var errorDescription: String? {
         switch self {
@@ -251,9 +278,11 @@ public enum DiaryError: Error, LocalizedError, Equatable {
         case .invalidNoteFolderName:
             return "Введите название папки одной строкой, до 120 знаков."
         case .duplicateNoteFolderName:
-            return "Папка с таким названием уже есть."
+            return "На этом уровне уже есть папка с таким названием."
         case .noteFolderNotFound:
             return "Папка заметок не найдена."
+        case .invalidNoteFolderMove:
+            return "Нельзя переместить папку в неё саму или в её подпапку."
         }
     }
 }
@@ -461,7 +490,8 @@ public final class DiaryStore {
             guard diskData == loadedData else { throw DiaryError.conflictingChanges }
             if let original = loadedData {
                 let oldVersion = try DiaryJSON.decode(original).version
-                let migrations = document.version == 8 ? [(8, "note-folders")]
+                let migrations = document.version >= 8
+                    ? [(document.version, document.version == 9 ? "note-folder-tree" : "note-folders")]
                     : [(4, "organizer"), (5, "steps"), (6, "chaos"), (7, "review")]
                 for (version, name) in migrations where oldVersion < version && version <= document.version {
                     let backup = directory.appendingPathComponent("entries-before-\(name)-\(UUID().uuidString).json")
@@ -824,8 +854,10 @@ public final class DiaryStore {
 
     // MARK: Note folders
 
-    public func addNoteFolder(name: String) throws -> NoteFolder {
-        let folder = NoteFolder(id: UUID(), name: try checkedNoteFolderName(name))
+    public func addNoteFolder(name: String, parentID: UUID? = nil) throws -> NoteFolder {
+        if let parentID, !noteFolders.contains(where: { $0.id == parentID }) { throw DiaryError.noteFolderNotFound }
+        let name = try checkedNoteFolderName(name, in: parentID)
+        let folder = NoteFolder(id: UUID(), name: name, parentID: parentID)
         try persist(entries: entries, plans: plans, notes: notes, noteFolders: noteFolders + [folder])
         return folder
     }
@@ -833,17 +865,41 @@ public final class DiaryStore {
     public func renameNoteFolder(id: UUID, name: String) throws {
         guard let index = noteFolders.firstIndex(where: { $0.id == id }) else { throw DiaryError.noteFolderNotFound }
         var folders = noteFolders
-        folders[index].name = try checkedNoteFolderName(name, excluding: id)
+        folders[index].name = try checkedNoteFolderName(name, in: folders[index].parentID, excluding: id)
+        try persist(entries: entries, plans: plans, notes: notes, noteFolders: folders)
+    }
+
+    public func moveNoteFolder(id: UUID, to parentID: UUID?) throws {
+        guard let index = noteFolders.firstIndex(where: { $0.id == id }) else { throw DiaryError.noteFolderNotFound }
+        let folder = noteFolders[index]
+        guard folder.parentID != parentID else { return }
+        if let parentID {
+            let foldersByID = Dictionary(uniqueKeysWithValues: noteFolders.map { ($0.id, $0) })
+            guard foldersByID[parentID] != nil else { throw DiaryError.noteFolderNotFound }
+            guard !NoteFolder.path(to: parentID, in: foldersByID).contains(where: { $0.id == id }) else {
+                throw DiaryError.invalidNoteFolderMove
+            }
+        }
+        _ = try checkedNoteFolderName(folder.name, in: parentID, excluding: id)
+        var folders = noteFolders
+        folders[index].parentID = parentID
         try persist(entries: entries, plans: plans, notes: notes, noteFolders: folders)
     }
 
     public func deleteNoteFolder(id: UUID) throws {
-        guard noteFolders.contains(where: { $0.id == id }) else { throw DiaryError.noteFolderNotFound }
+        guard let index = noteFolders.firstIndex(where: { $0.id == id }) else { throw DiaryError.noteFolderNotFound }
+        let parentID = noteFolders[index].parentID
+        var folders = noteFolders
+        folders.remove(at: index)
+        for child in folders.indices where folders[child].parentID == id {
+            _ = try checkedNoteFolderName(folders[child].name, in: parentID, excluding: id)
+            folders[child].parentID = parentID
+        }
         var remainingNotes = notes
         for index in remainingNotes.indices where remainingNotes[index].folderID == id {
-            remainingNotes[index].folderID = nil
+            remainingNotes[index].folderID = parentID
         }
-        try persist(entries: entries, plans: plans, notes: remainingNotes, noteFolders: noteFolders.filter { $0.id != id })
+        try persist(entries: entries, plans: plans, notes: remainingNotes, noteFolders: folders)
     }
 
     public func moveNote(id: UUID, to folderID: UUID?) throws {
@@ -855,13 +911,14 @@ public final class DiaryStore {
         try persist(entries: entries, plans: plans, notes: remainingNotes)
     }
 
-    private func checkedNoteFolderName(_ raw: String, excluding id: UUID? = nil) throws -> String {
+    private func checkedNoteFolderName(_ raw: String, in parentID: UUID?, excluding id: UUID? = nil) throws -> String {
         let name = Self.cleanTitle(raw)
         guard (1...120).contains(name.count), name.rangeOfCharacter(from: .controlCharacters) == nil else {
             throw DiaryError.invalidNoteFolderName
         }
         guard !noteFolders.contains(where: {
-            $0.id != id && $0.name.compare(name, options: [.caseInsensitive, .diacriticInsensitive], locale: DiaryFormat.ru) == .orderedSame
+            $0.id != id && $0.parentID == parentID
+                && $0.name.compare(name, options: [.caseInsensitive, .diacriticInsensitive], locale: DiaryFormat.ru) == .orderedSame
         }) else { throw DiaryError.duplicateNoteFolderName }
         return name
     }
@@ -921,10 +978,15 @@ public final class DiaryStore {
         if hasOrganizerData { out += "\n" + organizerMarkdown(calendar: calendar) }
         if !notes.isEmpty || !noteFolders.isEmpty {
             out += "\n## Заметки\n"
-            let folderNames = Dictionary(uniqueKeysWithValues: noteFolders.map { ($0.id, $0.name) })
+            let foldersByID = Dictionary(uniqueKeysWithValues: noteFolders.map { ($0.id, $0) })
+            let folderNames = foldersByID.mapValues { folder in
+                NoteFolder.path(to: folder.id, in: foldersByID).map(\.name).joined(separator: " › ")
+            }
             if !noteFolders.isEmpty {
                 out += "\nПапки\n"
-                for folder in noteFolders { out += "- \(markdownInlineText(folder.name))\n" }
+                for folder in noteFolders {
+                    out += "- \(markdownInlineText(folderNames[folder.id] ?? folder.name))\n"
+                }
             }
             for n in sortedNotes() {
                 let rawTitle = n.title.isEmpty ? "Без заголовка" : n.title

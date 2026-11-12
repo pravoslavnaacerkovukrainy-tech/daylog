@@ -530,10 +530,12 @@ test("Документ: v2-файл читается как notes=[]") {
     let v2 = #"{"format":"daylog","version":2,"entries":[],"plans":[]}"#.data(using: .utf8)!
     check(try DiaryJSON.decode(v2).notes.isEmpty, "notes по умолчанию пусты")
 }
-test("Документ: будущая версия 9 отвергается как неподдерживаемая") {
-    let future = #"{"format":"daylog","version":9,"entries":[],"notes":[]}"#.data(using: .utf8)!
-    let err = expectError("v9 не поддерживается") { _ = try DiaryJSON.decode(future) }
-    check((err as? DiaryError) == .unsupportedFormat("версия 9, приложение понимает версию до 8"), "сообщение про версию: \(String(describing: err))")
+test("Документ: будущая версия отвергается как неподдерживаемая") {
+    let current = DiaryDocument.currentVersion
+    let future = Data("{\"format\":\"daylog\",\"version\":\(current + 1),\"entries\":[]}".utf8)
+    let err = expectError("будущая версия не поддерживается") { _ = try DiaryJSON.decode(future) }
+    check((err as? DiaryError) == .unsupportedFormat("версия \(current + 1), приложение понимает версию до \(current)"),
+          "сообщение про версию: \(String(describing: err))")
 }
 
 test("Документ: версия 7 только при новых полях пересмотра") {
@@ -627,22 +629,73 @@ test("Папки заметок: прежний профиль, перенос, 
     check(export.notes.allSatisfy { $0.folderID == nil }, "возврат заметки и удаление её папки ведут в «Без папки»")
 }
 
+test("Дерево папок: перенос, сохранение, продвижение детей и проверка ссылок") {
+    let directory = freshDir("note-folder-tree")
+    let store = DiaryStore(directory: directory)
+    let work = try store.addNoteFolder(name: "Работа")
+    let personal = try store.addNoteFolder(name: "Личное")
+    let oldData = try Data(contentsOf: store.fileURL)
+    let docs = try store.addNoteFolder(name: "Документы", parentID: work.id)
+    let otherDocs = try store.addNoteFolder(name: "Документы", parentID: personal.id)
+    let archive = try store.addNoteFolder(name: "Архив", parentID: docs.id)
+    let note = try store.addNote(title: "Материалы", body: "Текст", folderID: docs.id)
+    check(try DiaryJSON.decode(oldData).version == 8 && DiaryJSON.decode(store.exportJSON()).version == 9,
+          "старый файл читается, дерево сохраняется в новой версии")
+    let backupName = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        .first { $0.hasPrefix("entries-before-note-folder-tree-") }
+    check(try backupName.map { try Data(contentsOf: directory.appendingPathComponent($0)) } == oldData,
+          "первая вложенная папка сохраняет прежний файл")
+    let cycle = expectError("нельзя переместить папку в потомка") { try store.moveNoteFolder(id: work.id, to: archive.id) }
+    check(cycle as? DiaryError == .invalidNoteFolderMove, "цикл отклонён")
+    let duplicate = expectError("одинаковые папки нельзя объединить переносом") {
+        try store.moveNoteFolder(id: docs.id, to: personal.id)
+    }
+    check(duplicate as? DiaryError == .duplicateNoteFolderName, "имена уникальны среди соседей")
+    try store.renameNoteFolder(id: otherDocs.id, name: "Личные файлы")
+    try store.moveNoteFolder(id: docs.id, to: personal.id)
+    let reopened = DiaryStore(directory: directory)
+    try reopened.load()
+    let folders = Dictionary(uniqueKeysWithValues: reopened.noteFolders.map { ($0.id, $0) })
+    check(NoteFolder.path(to: archive.id, in: folders).map(\.id) == [personal.id, docs.id, archive.id],
+          "переносит всё поддерево и сохраняет порядок предков после перезапуска")
+    check(reopened.notes.first { $0.id == note.id }?.folderID == docs.id, "перенос папки сохраняет принадлежность заметки")
+    let clash = try reopened.addNoteFolder(name: "Архив", parentID: personal.id)
+    expectError("удаление с конфликтом имён атомарно") { try reopened.deleteNoteFolder(id: docs.id) }
+    check(reopened.notes.first?.folderID == docs.id && reopened.noteFolders.contains(where: { $0.id == docs.id }),
+          "конфликт не переносит заметки и не удаляет папку")
+    try reopened.renameNoteFolder(id: clash.id, name: "Старый архив")
+    try reopened.deleteNoteFolder(id: docs.id)
+    check(reopened.notes.first?.folderID == personal.id
+          && reopened.noteFolders.first(where: { $0.id == archive.id })?.parentID == personal.id,
+          "удаление поднимает вложенные папки и заметки на уровень выше")
+    var malformed = try DiaryJSON.decode(reopened.exportJSON())
+    let parentIndex = malformed.noteFolders.firstIndex { $0.id == personal.id }!
+    malformed.noteFolders[parentIndex].parentID = archive.id
+    expectError("цикл в файле отклоняется") { _ = try DiaryJSON.decode(DiaryJSON.encoder().encode(malformed)) }
+    malformed.noteFolders[parentIndex].parentID = UUID()
+    expectError("отсутствующий родитель отклоняется") { _ = try DiaryJSON.decode(DiaryJSON.encoder().encode(malformed)) }
+}
+
 test("Папки заметок: экспорт сохраняет папки, ссылки и принадлежность") {
     let store = DiaryStore(directory: freshDir("folder-export"))
     let folder = try store.addNoteFolder(name: "../Анализ [архив] 📁")
-    let emptyFolder = try store.addNoteFolder(name: "Без записей")
+    let emptyFolder = try store.addNoteFolder(name: "Без записей", parentID: folder.id)
     let note = try store.addNote(title: "Материалы", body: "**Пример**", folderID: folder.id)
     let plain = try store.addNote(title: "Старая", body: "Без папки")
     let bundle = try store.exportMarkdownFolder(parentDirectory: freshDir("folder-export-target"), now: day1)
     let paths = try fm.contentsOfDirectory(at: bundle.notesDirectoryURL, includingPropertiesForKeys: nil)
     let directories = paths.filter { $0.hasDirectoryPath || (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-    check(directories.count == 2 && paths.contains(where: { $0.lastPathComponent == "\(plain.id.uuidString).md" }),
-          "обе тематические папки созданы, обычные заметки остались в корне")
+    check(directories.count == 1 && paths.contains(where: { $0.lastPathComponent == "\(plain.id.uuidString).md" }),
+          "в корне только папки верхнего уровня и заметки без папки")
     if let saved = directories.first(where: { $0.lastPathComponent.hasSuffix(folder.id.uuidString) }) {
         let text = try String(contentsOf: saved.appendingPathComponent("\(note.id.uuidString).md"), encoding: .utf8)
         let index = try String(contentsOf: bundle.readmeURL, encoding: .utf8)
+        let nested = try fm.contentsOfDirectory(at: saved, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.hasSuffix(emptyFolder.id.uuidString) }
         check(text.hasSuffix(note.body) && index.contains("Заметки/\(saved.lastPathComponent)/\(note.id.uuidString).md"),
               "безопасный путь совпадает со ссылкой, содержимое сохранилось")
+        check(nested.map { index.contains("Заметки/\(saved.lastPathComponent)/\($0.lastPathComponent)/") } == true,
+              "даже пустая подпапка и ссылка на неё остаются вложенными")
     } else { check(false, "нет папки заметки") }
     let restored = try DiaryStore.parseExportDocument(Data(contentsOf: bundle.archiveURL))
     check(restored.noteFolders == [folder, emptyFolder] && restored.notes.first(where: { $0.id == note.id })?.folderID == folder.id,

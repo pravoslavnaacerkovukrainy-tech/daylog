@@ -42,7 +42,11 @@ public enum MarkdownFolderExport {
             let archiveData = try store.exportJSON(now: now)
             try archiveData.write(to: archiveURL, options: .withoutOverwriting)
 
-            let readmeData = Data(readmeText(store: store, now: now, calendar: calendar).utf8)
+            let foldersByID = Dictionary(uniqueKeysWithValues: store.noteFolders.map { ($0.id, $0) })
+            let folderPaths = foldersByID.mapValues { folder in
+                NoteFolder.path(to: folder.id, in: foldersByID)
+            }
+            let readmeData = Data(readmeText(store: store, folderPaths: folderPaths, now: now, calendar: calendar).utf8)
             try readmeData.write(to: readmeURL, options: .withoutOverwriting)
             if store.hasOrganizerData {
                 try Data(store.organizerMarkdown(calendar: calendar).utf8)
@@ -58,10 +62,12 @@ public enum MarkdownFolderExport {
             }
 
             var folderURLs: [UUID: URL] = [:]
-            for folder in store.noteFolders {
-                let folderURL = notesDirectory.appendingPathComponent(noteFolderDirectoryName(folder), isDirectory: true)
-                try fm.createDirectory(at: folderURL, withIntermediateDirectories: false)
-                folderURLs[folder.id] = folderURL
+            for (id, path) in folderPaths {
+                let folderURL = path.reduce(notesDirectory) { directory, folder in
+                    directory.appendingPathComponent(noteFolderDirectoryName(folder), isDirectory: true)
+                }
+                try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
+                folderURLs[id] = folderURL
             }
             for note in store.sortedNotes() {
                 let filename = "\(note.id.uuidString).md"
@@ -109,7 +115,7 @@ private func sortedDayKeys(store: DiaryStore, calendar: Calendar) -> [String] {
     return set.sorted()
 }
 
-private func readmeText(store: DiaryStore, now: Date, calendar: Calendar) -> String {
+private func readmeText(store: DiaryStore, folderPaths: [UUID: [NoteFolder]], now: Date, calendar: Calendar) -> String {
     let timeZone = calendar.timeZone
     let tzName = timeZone.identifier.isEmpty ? "UTC" : timeZone.identifier
     let offset = offsetString(for: timeZone, at: now)
@@ -145,11 +151,13 @@ private func readmeText(store: DiaryStore, now: Date, calendar: Calendar) -> Str
     }
 
     out += "\n\n### Заметки\n"
-    let folders = Dictionary(uniqueKeysWithValues: store.noteFolders.map { ($0.id, $0) })
+    let folderLinks = folderPaths.mapValues { $0.map(noteFolderDirectoryName).joined(separator: "/") + "/" }
     if !store.noteFolders.isEmpty {
         out += "\nПапки\n"
         for folder in store.noteFolders {
-            out += "- [\(markdownLinkLabel(folder.name))](Заметки/\(noteFolderDirectoryName(folder))/)\n"
+            guard let path = folderPaths[folder.id], let link = folderLinks[folder.id] else { continue }
+            let label = path.map(\.name).joined(separator: " › ")
+            out += "- [\(markdownLinkLabel(label))](Заметки/\(link))\n"
         }
         out += "\n"
     }
@@ -159,7 +167,7 @@ private func readmeText(store: DiaryStore, now: Date, calendar: Calendar) -> Str
         for note in store.sortedNotes() {
             let fileName = "\(note.id.uuidString).md"
             let label = note.title.isEmpty ? "Без заголовка" : note.title
-            let prefix = note.folderID.flatMap { folders[$0] }.map { noteFolderDirectoryName($0) + "/" } ?? ""
+            let prefix = note.folderID.flatMap { folderLinks[$0] } ?? ""
             out += "\n- [\(markdownLinkLabel(label))](Заметки/\(prefix)\(fileName))"
         }
     }

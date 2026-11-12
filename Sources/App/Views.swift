@@ -622,14 +622,11 @@ struct ContentView: View {
 
 // MARK: - Notes
 
-extension Notification.Name {
-    /// Отдельный сигнал нужен и при повторном вызове команды с уже пустым выбором.
-    static let daylogNewNote = Notification.Name("Daylog.newNote")
-}
-
 struct NotesView: View {
     @EnvironmentObject var state: AppState
     @State private var newNoteToken = UUID()
+    @State private var startEditingNewNote = false
+    @State private var expandedFolders: Set<UUID> = []
     @State private var folderEdit: FolderEdit?
     @State private var deletingFolder: NoteFolder?
     @FocusState private var searchFocused: Bool
@@ -637,6 +634,14 @@ struct NotesView: View {
     private struct FolderEdit: Identifiable {
         let id = UUID()
         let folder: NoteFolder?
+        let parentID: UUID?
+    }
+
+    private struct FolderRow: Identifiable {
+        let folder: NoteFolder
+        let depth: Int
+        let hasChildren: Bool
+        var id: UUID { folder.id }
     }
 
     private var isSearching: Bool {
@@ -655,11 +660,22 @@ struct NotesView: View {
         state.noteFolders.first { $0.id == state.noteScope.folderID }
     }
 
-    private var scopeTitle: String {
-        currentFolder?.name ?? (state.noteScope == .unfiled ? "Без папки" : "Все заметки")
+    private var visibleFolders: [FolderRow] {
+        let children = Dictionary(grouping: state.noteFolders, by: \.parentID)
+        var pending = (children[nil] ?? []).reversed().map { (folder: $0, depth: 0) }
+        var rows: [FolderRow] = []
+        while let (folder, depth) = pending.popLast() {
+            let subfolders = children[folder.id] ?? []
+            rows.append(FolderRow(folder: folder, depth: depth, hasChildren: !subfolders.isEmpty))
+            if expandedFolders.contains(folder.id) {
+                pending.append(contentsOf: subfolders.reversed().map { (folder: $0, depth: depth + 1) })
+            }
+        }
+        return rows
     }
 
     var body: some View {
+        let foldersByID = state.noteFoldersByID
         HSplitView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Заметки")
@@ -683,8 +699,8 @@ struct NotesView: View {
                 } else {
                     List(selection: $state.selectedNoteID) {
                         ForEach(notes) { note in
-                            NoteRow(note: note, folderName: state.noteScope == .all
-                                    ? state.noteFolders.first { $0.id == note.folderID }?.name : nil)
+                            let path = note.folderID.map { NoteFolder.path(to: $0, in: foldersByID).map(\.name).joined(separator: " › ") }
+                            NoteRow(note: note, folderName: state.noteScope == .all ? path : nil)
                                 .tag(note.id)
                         }
                     }
@@ -696,19 +712,25 @@ struct NotesView: View {
             .frame(minWidth: 240, idealWidth: 280, maxWidth: 340, maxHeight: .infinity, alignment: .top)
             .background(Theme.pane)
 
-            NoteEditor(state: state, note: selectedNote, folderID: state.noteScope.folderID)
+            NoteEditor(state: state, note: selectedNote, folderID: state.noteScope.folderID,
+                       startsEditing: selectedNote == nil && startEditingNewNote)
                 .id(state.selectedNoteID?.uuidString ?? newNoteToken.uuidString)
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
         }
         .onChange(of: state.focusToken) { _, _ in
             if state.focusRequest == .search { searchFocused = true }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .daylogNewNote)) { notification in
-            guard let source = notification.object as? AppState, source === state else { return }
-            newNote()
+        .onChange(of: state.newNoteRequested, initial: true) { _, requested in
+            if requested {
+                newNote()
+                state.consumeNewNoteRequest()
+            }
+        }
+        .onChange(of: state.noteScope, initial: true) { _, _ in
+            revealCurrentFolder()
         }
         .sheet(item: $folderEdit) { edit in
-            NoteFolderEditor(state: state, folder: edit.folder) { folder in
+            NoteFolderEditor(state: state, folder: edit.folder, parentID: edit.parentID) { folder in
                 if edit.folder == nil { selectScope(.folder(folder.id)) }
             }
         }
@@ -718,41 +740,133 @@ struct NotesView: View {
             Button("Удалить папку", role: .destructive) { state.deleteNoteFolder(folder.id) }
             Button("Отмена", role: .cancel) {}
         } message: { folder in
-            Text("Заметки из папки «\(folder.name)» будут видны в разделе «Без папки».")
+            let destination = folder.parentID.flatMap { foldersByID[$0]?.name }
+            Text(destination.map { "Заметки и подпапки перейдут в «\($0)»." }
+                 ?? "Подпапки перейдут на верхний уровень, а заметки — в «Без папки».")
         }
     }
 
     private var folderNavigation: some View {
-        HStack(spacing: 6) {
-            Menu {
-                Button("Все заметки") { selectScope(.all) }
-                Button("Без папки") { selectScope(.unfiled) }
-                if !state.noteFolders.isEmpty { Divider() }
-                ForEach(state.noteFolders) { folder in
-                    Button(folder.name) { selectScope(.folder(folder.id)) }
+        let rows = visibleFolders
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                scopeButton("Все заметки", scope: .all)
+                scopeButton("Без папки", scope: .unfiled)
+                Spacer(minLength: 0)
+                Button {
+                    folderEdit = FolderEdit(folder: nil, parentID: currentFolder?.id)
+                } label: {
+                    Label(currentFolder == nil ? "Новая папка" : "Новая подпапка",
+                          systemImage: "folder.badge.plus").labelStyle(.iconOnly)
                 }
+                .help(currentFolder.map { "Создать подпапку в «\($0.name)»" } ?? "Создать папку верхнего уровня")
+                .disabled(state.isBlocked)
                 if let folder = currentFolder {
-                    Divider()
-                    Button("Переименовать папку…") { folderEdit = FolderEdit(folder: folder) }
-                        .disabled(state.isBlocked)
-                    Button("Удалить папку…", role: .destructive) { deletingFolder = folder }
-                        .disabled(state.isBlocked)
+                    Menu {
+                        folderActions(folder)
+                    } label: {
+                        Label("Действия с папкой", systemImage: "ellipsis.circle").labelStyle(.iconOnly)
+                    }
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .disabled(state.isBlocked)
                 }
-            } label: {
-                Label(scopeTitle, systemImage: currentFolder == nil ? "folder" : "folder.fill")
-                    .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel("Папки заметок")
-            .accessibilityValue(scopeTitle)
-            Button {
-                folderEdit = FolderEdit(folder: nil)
-            } label: {
-                Label("Новая папка", systemImage: "folder.badge.plus").labelStyle(.iconOnly)
+            if !rows.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(rows) { row in folderRow(row) }
+                    }
+                }
+                .frame(height: min(156, CGFloat(rows.count) * 26))
+                .accessibilityLabel("Папки заметок")
             }
-            .help("Создать тематическую папку")
-            .disabled(state.isBlocked)
         }
+    }
+
+    private func scopeButton(_ title: String, scope: NoteScope) -> some View {
+        Button(title) { selectScope(scope) }
+            .buttonStyle(.borderless)
+            .foregroundStyle(state.noteScope == scope ? Theme.accent : Theme.ink)
+            .accessibilityAddTraits(state.noteScope == scope ? .isSelected : [])
+    }
+
+    private func folderRow(_ row: FolderRow) -> some View {
+        let isExpanded = expandedFolders.contains(row.id)
+        let isSelected = state.noteScope == .folder(row.id)
+        return HStack(spacing: 2) {
+            if row.hasChildren {
+                Button {
+                    if isExpanded { expandedFolders.remove(row.id) } else { expandedFolders.insert(row.id) }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 18, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.quiet)
+                .accessibilityLabel("\(isExpanded ? "Свернуть" : "Развернуть") «\(row.folder.name)»")
+            } else {
+                Color.clear.frame(width: 18, height: 1).accessibilityHidden(true)
+            }
+            Button {
+                selectScope(.folder(row.id))
+            } label: {
+                Label(row.folder.name, systemImage: isSelected ? "folder.fill" : "folder")
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(isSelected ? Theme.accent : Theme.ink)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        }
+        .padding(.leading, CGFloat(min(row.depth, 12)) * 12)
+        .frame(height: 26)
+        .background(isSelected ? Theme.accent.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+        .contextMenu { folderActions(row.folder) }
+    }
+
+    @ViewBuilder
+    private func folderActions(_ folder: NoteFolder) -> some View {
+        let foldersByID = state.noteFoldersByID
+        Button("Новая подпапка…") { folderEdit = FolderEdit(folder: nil, parentID: folder.id) }
+            .disabled(state.isBlocked)
+        Button("Новая папка верхнего уровня…") { folderEdit = FolderEdit(folder: nil, parentID: nil) }
+            .disabled(state.isBlocked)
+        Button("Переименовать…") { folderEdit = FolderEdit(folder: folder, parentID: folder.parentID) }
+            .disabled(state.isBlocked)
+        Menu("Переместить папку в") {
+            if folder.parentID != nil {
+                Button("Верхний уровень") { moveFolder(folder, to: nil) }
+            }
+            ForEach(state.noteFolders) { target in
+                let path = NoteFolder.path(to: target.id, in: foldersByID)
+                if target.id != folder.parentID, !path.contains(where: { $0.id == folder.id }) {
+                    Button(path.map(\.name).joined(separator: " › ")) { moveFolder(folder, to: target.id) }
+                }
+            }
+        }
+        .disabled(state.isBlocked || (folder.parentID == nil && state.noteFolders.allSatisfy {
+            NoteFolder.path(to: $0.id, in: foldersByID).contains(where: { $0.id == folder.id })
+        }))
+        Divider()
+        Button("Удалить папку…", role: .destructive) { deletingFolder = folder }
+            .disabled(state.isBlocked)
+    }
+
+    private func moveFolder(_ folder: NoteFolder, to parentID: UUID?) {
+        if state.moveNoteFolder(folder.id, to: parentID) {
+            selectScope(.folder(folder.id))
+            revealCurrentFolder()
+        }
+    }
+
+    private func revealCurrentFolder() {
+        guard let id = state.noteScope.folderID else { return }
+        let path = NoteFolder.path(to: id, in: state.noteFoldersByID)
+        expandedFolders.formUnion(path.dropLast().map(\.id))
     }
 
     private func selectScope(_ scope: NoteScope) {
@@ -760,7 +874,7 @@ struct NotesView: View {
         state.noteScope = scope
         state.noteSearchText = ""
         if let selectedNote, scope.includes(selectedNote) { return }
-        newNote()
+        resetNote(startEditing: false)
     }
 
     private var searchField: some View {
@@ -789,8 +903,13 @@ struct NotesView: View {
     }
 
     private func newNote() {
+        resetNote(startEditing: true)
+    }
+
+    private func resetNote(startEditing: Bool) {
         state.selectedNoteID = nil
         state.noteSearchText = ""
+        startEditingNewNote = startEditing
         newNoteToken = UUID()
     }
 }
@@ -836,20 +955,27 @@ private struct NoteFolderEditor: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var nameFocused: Bool
     let folder: NoteFolder?
+    let parentID: UUID?
     let onSave: (NoteFolder) -> Void
     @State private var name: String
     @State private var error: String?
 
-    init(state: AppState, folder: NoteFolder?, onSave: @escaping (NoteFolder) -> Void) {
+    init(state: AppState, folder: NoteFolder?, parentID: UUID?, onSave: @escaping (NoteFolder) -> Void) {
         self.state = state
         self.folder = folder
+        self.parentID = parentID
         self.onSave = onSave
         _name = State(initialValue: folder?.name ?? "")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(folder == nil ? "Новая папка" : "Переименовать папку").font(Theme.title)
+            Text(folder != nil ? "Переименовать папку" : parentID == nil ? "Новая папка" : "Новая подпапка")
+                .font(Theme.title)
+            if let parentID {
+                Text(NoteFolder.path(to: parentID, in: state.noteFoldersByID).map(\.name).joined(separator: " › "))
+                    .font(Theme.caption).foregroundStyle(Theme.quiet)
+            }
             TextField("Название папки", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($nameFocused)
@@ -871,7 +997,7 @@ private struct NoteFolderEditor: View {
         if let folder {
             guard state.renameNoteFolder(folder.id, to: name) else { error = state.errorMessage; return }
         } else {
-            guard let created = state.addNoteFolder(name) else { error = state.errorMessage; return }
+            guard let created = state.addNoteFolder(name, parentID: parentID) else { error = state.errorMessage; return }
             onSave(created)
         }
         dismiss()
@@ -896,13 +1022,13 @@ struct NoteEditor: View {
     @State private var savedText: String
     @State private var draftFolderID: UUID?
     /// Режим только для показа: переключение ничего не сохраняет и не трогает черновик.
-    @State private var mode: Mode = .editor
+    @State private var mode: Mode
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case title, body }
     private enum Mode: Hashable { case editor, preview }
 
-    init(state: AppState, note: DiaryNote?, folderID: UUID?) {
+    init(state: AppState, note: DiaryNote?, folderID: UUID?, startsEditing: Bool) {
         self.state = state
         self.note = note
         _title = State(initialValue: note?.title ?? "")
@@ -911,6 +1037,7 @@ struct NoteEditor: View {
         _savedTitle = State(initialValue: note?.title ?? "")
         _savedText = State(initialValue: note?.body ?? "")
         _draftFolderID = State(initialValue: folderID)
+        _mode = State(initialValue: startsEditing ? .editor : .preview)
     }
 
 
@@ -941,8 +1068,8 @@ struct NoteEditor: View {
                     .help(Text(verbatim: "Поддерживается Markdown: # заголовки, **жирный**, *курсив*, списки, - [ ] задачи, > цитаты, ``` код, ссылки."))
                 Spacer(minLength: 8)
                 Picker("Режим заметки", selection: $mode) {
-                    Text("Редактор").tag(Mode.editor)
                     Text("Просмотр").tag(Mode.preview)
+                    Text("Редактор").tag(Mode.editor)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -1003,7 +1130,9 @@ struct NoteEditor: View {
         }
         .padding(24)
         .background(Theme.canvas)
-        .onAppear { focus = .title }
+        .onAppear {
+            if mode == .editor { focus = .title }
+        }
         .onDisappear { polishTask?.cancel(); state.cancelNotePolish(); persistIfNeeded() }
         .sheet(item: Binding(get: { state.notePolishPreflight }, set: { if $0 == nil { state.cancelNotePolish() } })) { preflight in
             AIPreflightSheet(
@@ -1023,18 +1152,24 @@ struct NoteEditor: View {
 
     private var folderMenu: some View {
         let id = persistedID == nil ? draftFolderID : note?.folderID
-        let folder = state.noteFolders.first { $0.id == id }
+        let foldersByID = state.noteFoldersByID
+        let paths = foldersByID.mapValues { folder in
+            NoteFolder.path(to: folder.id, in: foldersByID).map(\.name).joined(separator: " › ")
+        }
+        let label = id.flatMap { paths[$0] } ?? "Без папки"
         return Menu {
             Button("Без папки") { chooseFolder(nil) }
-            ForEach(state.noteFolders) { folder in
-                Button(folder.name) { chooseFolder(folder.id) }
+            ForEach(state.noteFolders.sorted {
+                (paths[$0.id] ?? $0.name).localizedStandardCompare(paths[$1.id] ?? $1.name) == .orderedAscending
+            }) { folder in
+                Button(paths[folder.id] ?? folder.name) { chooseFolder(folder.id) }
             }
         } label: {
-            Label(folder?.name ?? "Без папки", systemImage: "folder")
+            Label(label, systemImage: "folder")
                 .lineLimit(1)
         }
         .accessibilityLabel("Папка заметки")
-        .accessibilityValue(folder?.name ?? "Без папки")
+        .accessibilityValue(label)
         .help(persistedID == nil ? "Выбрать папку для заметки" : "Переместить заметку")
         .disabled(polishBusy || state.isBlocked)
     }

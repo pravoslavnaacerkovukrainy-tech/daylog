@@ -85,12 +85,9 @@ struct DaylogCommands: Commands {
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(state.isBlocked)
             Button("Новая заметка") {
-                state.mode = .notes
-                state.selectedNoteID = nil
-                state.noteSearchText = ""
+                state.requestNewNote()
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
-                NotificationCenter.default.post(name: .daylogNewNote, object: state)
             }
                 .keyboardShortcut("n", modifiers: [.command, .option])
         }
@@ -155,11 +152,8 @@ struct MenuBarContent: View {
         }
         .disabled(state.isBlocked)
         Button("Новая заметка…") {
-            state.mode = .notes
-            state.selectedNoteID = nil
-            state.noteSearchText = ""
+            state.requestNewNote()
             showWindow()
-            NotificationCenter.default.post(name: .daylogNewNote, object: state)
         }
         Button("Открыть «Хаос Дня»") {
             showWindow()
