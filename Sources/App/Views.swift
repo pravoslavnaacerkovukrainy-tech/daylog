@@ -73,6 +73,12 @@ struct ContentView: View {
     @State private var editing: DiaryEntry?
     @State private var pendingDelete: DiaryEntry?
 
+    @State private var polishPreview: String?
+    @State private var polishBusy = false
+    @State private var polishTask: Task<Void, Never>?
+    @State private var keyField = ""
+    @State private var keyError: String?
+
     private var draftIsBlank: Bool {
         draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -93,6 +99,14 @@ struct ContentView: View {
             case .notes:
                 VStack(spacing: 0) {
                     NotesView()
+                    statusArea
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 14)
+                }
+                .background(Theme.canvas)
+            case .ask:
+                VStack(spacing: 0) {
+                    AskView()
                     statusArea
                         .padding(.horizontal, 24)
                         .padding(.bottom, 14)
@@ -119,6 +133,38 @@ struct ContentView: View {
         .onChange(of: customTime) { _, on in
             if on { draftTime = defaultCustomTime() }
         }
+        .onChange(of: state.polishRequestToken) { _, _ in
+            beginPolish()
+        }
+        .sheet(isPresented: Binding(get: { polishPreview != nil }, set: { if !$0 { cancelPolish() } })) {
+            if let text = polishPreview {
+                PolishConfirmSheet(draft: text, busy: polishBusy, onCancel: cancelPolish, onSend: sendPolish)
+            }
+        }
+        .sheet(isPresented: Binding(get: { state.keySheetIntent != nil }, set: { if !$0 { closeKeySheet() } })) {
+            APIKeySheet(
+                key: $keyField,
+                error: keyError,
+                hasSavedKey: GroqKeyStore.load() != nil,
+                onCancel: closeKeySheet,
+                onSave: saveKey,
+                onDelete: deleteKey
+            )
+        }
+        .sheet(isPresented: Binding(get: { state.summaryPreflight != nil || state.daySummary != nil || state.summaryBusy },
+                                    set: { if !$0 { state.clearDaySummary() } })) {
+            if let entries = state.summaryPreflight {
+                AIPreflightSheet(
+                    title: "Итог дня за \(DiaryFormat.shortDate(state.selectedDay))",
+                    explanation: "В Groq уйдут только записи этого дня, показанные ниже. План, задачи, заметки и другие дни не отправляются. Итог не записывается в дневник. Условия обработки данных определяет Groq.",
+                    payload: DaySummary.buildDayText(entries),
+                    onCancel: state.clearDaySummary,
+                    onSend: state.confirmDaySummary)
+            } else {
+                DaySummarySheet(summary: state.daySummary, busy: state.summaryBusy,
+                                day: state.selectedDay, onClose: state.clearDaySummary)
+            }
+        }
     }
 
     // MARK: Toolbar
@@ -130,8 +176,9 @@ struct ContentView: View {
                 ("Дела", .organizer),
                 ("Дневник", .day),
                 ("Заметки", .notes),
+                ("Спросить", .ask),
             ])
-            .frame(width: 280)
+            .frame(width: 350)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
             Divider()
@@ -162,6 +209,13 @@ struct ContentView: View {
                             .datePickerStyle(.graphical)
                             .padding(12)
                     }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { state.summarizeDay() } label: {
+                    Label("Итог дня", systemImage: "doc.plaintext")
+                }
+                .help("Спокойный итог дня через Groq. Перед отправкой покажу записи (⌥⌘I)")
+                .disabled(state.dayEntries.isEmpty || state.summaryBusy || state.isBlocked || state.isSearching)
             }
         }
     }
@@ -277,6 +331,15 @@ struct ContentView: View {
                     .focused($focus, equals: .add)
                     .onSubmit(submit)
                     .accessibilityLabel("Новая запись в дневник")
+                if !draftIsBlank || polishBusy {
+                    Button(polishBusy ? "Причёсываю…" : "Причесать", action: beginPolish)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Theme.accent)
+                        .disabled(draftIsBlank || state.isBlocked || polishBusy)
+                        .fixedSize()
+                        .help("Сделать одну короткую фразу. В дневник не записывает (⌥⌘↩)")
+                        .accessibilityLabel("Причесать черновик")
+                }
             }
             if showContext {
                 TextField("На чём остановился — чтобы потом продолжить", text: $draftContext, axis: .vertical)
@@ -354,7 +417,7 @@ struct ContentView: View {
     }
 
     private func submit() {
-        guard !draftIsBlank, !state.isBlocked else { return }
+        guard !draftIsBlank, !state.isBlocked, !polishBusy else { return }
         let ts = customTime ? draftTime : Date()
         if state.add(text: draftText, context: showContext ? draftContext : nil, timestamp: ts) {
             draftText = ""
@@ -362,6 +425,82 @@ struct ContentView: View {
             showContext = false
             customTime = false
             focus = .add
+        }
+    }
+
+    private func beginPolish() {
+        let text = DraftPolish.normalizeInput(draftText)
+        guard !text.isEmpty, !state.isBlocked, !polishBusy else { return }
+        if GroqKeyStore.resolve() == nil {
+            keyField = ""
+            keyError = nil
+            state.keySheetIntent = .polish
+            return
+        }
+        polishPreview = text
+    }
+
+    private func sendPolish() {
+        guard let text = polishPreview, !polishBusy else { return }
+        guard let key = GroqKeyStore.resolve() else {
+            polishPreview = nil
+            state.keySheetIntent = .polish
+            return
+        }
+        polishBusy = true
+        polishTask = Task {
+            do {
+                let result = try await DraftPolishClient().polish(draft: text, apiKey: key)
+                guard !Task.isCancelled else { return }
+                draftText = result
+                polishPreview = nil
+                polishBusy = false
+                state.showDraftStatus("Черновик причёсан. В дневник попадёт после «Записать».")
+                focus = .add
+            } catch is CancellationError {
+                polishBusy = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                polishBusy = false
+                polishPreview = nil
+                state.showError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func cancelPolish() {
+        polishTask?.cancel()
+        polishTask = nil
+        polishBusy = false
+        polishPreview = nil
+    }
+
+    private func closeKeySheet() {
+        state.keySheetIntent = nil
+        keyField = ""
+        keyError = nil
+    }
+
+    private func saveKey() {
+        do {
+            try GroqKeyStore.save(keyField)
+            let continuePolish = state.keySheetIntent == .polish
+            closeKeySheet()
+            if continuePolish {
+                DispatchQueue.main.async { beginPolish() }
+            }
+        } catch {
+            keyError = error.localizedDescription
+        }
+    }
+
+    private func deleteKey() {
+        do {
+            try GroqKeyStore.delete()
+            keyField = ""
+            keyError = nil
+        } catch {
+            keyError = error.localizedDescription
         }
     }
 
@@ -610,12 +749,15 @@ struct NoteEditor: View {
     let note: DiaryNote?
     @State private var title: String
     @State private var text: String
+    @State private var beforePolish: (title: String, body: String)?
+    @State private var polishBusy = false
+    @State private var polishTask: Task<Void, Never>?
     @State private var confirmDelete = false
     /// Заметка, в которую пишет этот редактор: id исходной или созданной первым сохранением/автосохранением.
     /// Не nil → повторный addNote невозможен (нет дублей).
     @State private var persistedID: UUID?
     /// Последнее записанное в хранилище состояние черновика. Автосохранение срабатывает, если
-    /// title/text от него отличаются — любая правка после «Сохранить».
+    /// title/text от него отличаются - любая правка после «Сохранить», включая отмену оформления.
     @State private var savedTitle: String
     @State private var savedText: String
     /// Режим только для показа: переключение ничего не сохраняет и не трогает черновик.
@@ -635,9 +777,13 @@ struct NoteEditor: View {
         _savedText = State(initialValue: note?.body ?? "")
     }
 
-    private var isDirty: Bool { title != savedTitle || text != savedText }
 
     private var isBlank: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    private var polishDraft: String {
+        [title, text].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -647,7 +793,7 @@ struct NoteEditor: View {
                 .foregroundStyle(Theme.ink)
                 .focused($focus, equals: .title)
                 .accessibilityLabel("Заголовок заметки")
-                .disabled(state.isBlocked)
+                .disabled(polishBusy || state.isBlocked)
 
             HStack(alignment: .center, spacing: 8) {
                 Text("Текст заметки (Markdown)")
@@ -679,7 +825,7 @@ struct NoteEditor: View {
                         .strokeBorder(focus == .body ? Theme.accent : Theme.rail, lineWidth: focus == .body ? 1.5 : 1))
                     .focused($focus, equals: .body)
                     .accessibilityLabel("Текст заметки")
-                    .disabled(state.isBlocked || mode != .editor)
+                    .disabled(polishBusy || state.isBlocked || mode != .editor)
                     .opacity(mode == .editor ? 1 : 0)
                     .allowsHitTesting(mode == .editor)
                     .accessibilityHidden(mode != .editor)
@@ -690,11 +836,15 @@ struct NoteEditor: View {
             .onChange(of: mode) { _, newMode in
                 if newMode == .preview {
                     if focus == .body { focus = nil }
-                } else if !state.isBlocked {
+                } else if !polishBusy && !state.isBlocked {
                     focus = .body
                 }
             }
 
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { polishControls }
+                VStack(alignment: .leading, spacing: 8) { polishControls }
+            }
             HStack(spacing: 12) {
                 if let note {
                     Button(note.pinned ? "Открепить" : "Закрепить") {
@@ -709,12 +859,20 @@ struct NoteEditor: View {
                     .tint(Theme.accent)
                     .disabled(isBlank)
             }
-            .disabled(state.isBlocked)
+            .disabled(polishBusy || state.isBlocked)
         }
         .padding(24)
         .background(Theme.canvas)
         .onAppear { focus = .title }
-        .onDisappear { persistIfNeeded() }
+        .onDisappear { polishTask?.cancel(); state.cancelNotePolish(); persistIfNeeded() }
+        .sheet(item: Binding(get: { state.notePolishPreflight }, set: { if $0 == nil { state.cancelNotePolish() } })) { preflight in
+            AIPreflightSheet(
+                title: "Оформить заметку",
+                explanation: "В Groq уйдут только заголовок и текст этого наброска, показанные ниже. Дневник, план и другие заметки не отправляются. Результат появится в редакторе и запишется только после «Сохранить». Условия обработки данных определяет Groq.",
+                payload: preflight.draft,
+                onCancel: state.cancelNotePolish,
+                onSend: sendPolish)
+        }
         .confirmationDialog("Удалить заметку?", isPresented: $confirmDelete) {
             Button("Удалить", role: .destructive, action: delete)
             Button("Отмена", role: .cancel) { }
@@ -723,19 +881,73 @@ struct NoteEditor: View {
         }
     }
 
-    private func save() {
-        guard !isBlank, !state.isBlocked else { return }
-        let wasNew = persistedID == nil
-        if write(), wasNew, let id = persistedID {
-            state.selectedNoteID = id
+    @ViewBuilder
+    private var polishControls: some View {
+        HStack(spacing: 8) {
+            Button("Оформить…", action: beginPolish)
+                .disabled(polishDraft.isEmpty || polishBusy || state.isBlocked)
+                .help("Сначала покажу, что уйдёт в Groq. Отправка только после «Отправить».")
+                .accessibilityHint("Откроет проверку текста перед отправкой в Groq")
+            if polishBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Оформляю заметку")
+            }
         }
+        if beforePolish != nil {
+            Button("Отменить оформление") {
+                guard let previous = beforePolish else { return }
+                title = previous.title
+                text = previous.body
+                beforePolish = nil
+            }
+            .disabled(polishBusy || state.isBlocked)
+        }
+    }
+
+    /// Шаг 1: только показать набросок и получателя. Сети нет.
+    private func beginPolish() {
+        guard !polishBusy, !state.isBlocked, !polishDraft.isEmpty else { return }
+        state.beginNotePolish(draft: polishDraft)
+    }
+
+    /// Шаг 2, после «Отправить»: уходит показанный текст, заметка не сохраняется сама.
+    private func sendPolish() {
+        guard !polishBusy, state.notePolishPreflight != nil else { return }
+        let previous = (title: title, body: text)
+        polishBusy = true
+        polishTask = Task {
+            let result = await state.confirmNotePolish()
+            guard !Task.isCancelled else {
+                // Поздний результат отбрасываем, но не оставляем кнопки навсегда занятыми.
+                polishBusy = false
+                polishTask = nil
+                return
+            }
+            polishBusy = false
+            polishTask = nil
+            if let result {
+                if beforePolish == nil { beforePolish = previous }
+                title = result.title
+                text = result.body
+                focus = .body
+                state.showDraftStatus("Заметка оформлена. Нажмите «Сохранить», чтобы записать изменения.")
+            }
+        }
+    }
+
+    private func save() {
+        guard !isBlank, !polishBusy, !state.isBlocked else { return }
+        let wasNew = persistedID == nil
+        guard write(title: title, body: text) else { return }
+        beforePolish = nil
+        if wasNew, let id = persistedID { state.selectedNoteID = id }
     }
 
     /// Пишет текущий черновик: update, если заметка уже есть (исходная или созданная этим редактором),
     /// иначе add ровно один раз. При успехе запоминает записанное состояние как базу.
     @discardableResult
-    private func write() -> Bool {
-        let draftTitle = title, draftText = text
+    private func write(title draftTitle: String, body draftText: String) -> Bool {
         let ok: Bool
         if let id = persistedID {
             ok = state.updateNote(id: id, title: draftTitle, body: draftText)
@@ -755,17 +967,311 @@ struct NoteEditor: View {
     /// в том числе сделанные после явного «Сохранить». Без изменений относительно базы — ничего не пишем.
     /// Переключение «Редактор/Просмотр» сюда не ведёт: редактор не исчезает.
     private func persistIfNeeded() {
-        guard isDirty, !state.isBlocked else { return }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        write()
+        // До явного сохранения предложенного текста сохраняем только исходные ручные правки.
+        let draft = beforePolish ?? (title: title, body: text)
+        guard !state.isBlocked, draft.title != savedTitle || draft.body != savedText,
+              !draft.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        write(title: draft.title, body: draft.body)
     }
 
     private func delete() {
-        guard let note, !state.isBlocked else { return }
+        guard let note, !polishBusy, !state.isBlocked else { return }
         state.deleteNote(note)
         if !state.sortedNotes.contains(where: { $0.id == note.id }) {
             state.selectedNoteID = nil
         }
+    }
+}
+
+// MARK: - Notes chat
+
+extension Notification.Name {
+    static let daylogAskFocus = Notification.Name("Daylog.askFocus")
+}
+
+struct AskView: View {
+    @EnvironmentObject var state: AppState
+    @State private var draft = ""
+    @FocusState private var inputFocused: Bool
+    /// Выбор до согласия: только отметки в интерфейсе, контекст ещё не собирается.
+    @State private var pendingSelection: Set<UUID> = []
+    @State private var showNoteList = false
+
+    private var draftIsBlank: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        if state.chatMessages.isEmpty {
+                            Text(state.sortedNotes.isEmpty
+                                 ? "Сначала создайте заметки, чтобы по ним спрашивать"
+                                 : (state.chatConsentGiven ? "Спросите что-нибудь о выбранных заметках…"
+                                    : "Отметьте заметки внизу и разрешите передачу. До этого ничего не отправляется."))
+                                .font(Theme.text)
+                                .foregroundStyle(Theme.quiet)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: 460)
+                                .padding(.top, 80)
+                        } else {
+                            ForEach(state.chatMessages) { message in
+                                ChatBubble(message: message)
+                                    .id(message.id)
+                            }
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id("chat-bottom")
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity)
+                }
+                .onChange(of: state.chatMessages.count) { _, _ in
+                    withAnimation {
+                        proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    }
+                }
+                .onAppear {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    inputFocused = true
+                }
+            }
+
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                transferPanel
+                HStack(alignment: .bottom, spacing: 12) {
+                    TextField("Вопрос по заметкам", text: $draft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...6)
+                        .font(Theme.input)
+                        .foregroundStyle(Theme.ink)
+                        .focused($inputFocused)
+                        .disabled(state.chatBusy)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(inputFocused ? Theme.accent : Theme.rail,
+                                          lineWidth: inputFocused ? 1.5 : 1))
+                        .accessibilityLabel("Вопрос по заметкам")
+
+                    if state.chatBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.bottom, 12)
+                            .accessibilityLabel("ИИ отвечает")
+                    }
+                    if state.chatBusy {
+                        Button("Отменить запрос") { state.cancelChatRequest() }
+                    }
+                    Button("Очистить") { state.clearChat() }
+                        .disabled(state.chatBusy || state.chatMessages.isEmpty)
+                    Button("Спросить", action: submit)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                        .disabled(draftIsBlank || !state.canSendChat)
+                        .accessibilityHint(state.chatConsentGiven ? "Проверить текст перед отправкой в Groq" : "Сначала выберите заметки для чата")
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
+            .background(Theme.pane)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .daylogAskFocus)) { notification in
+            guard let source = notification.object as? AppState, source === state else { return }
+            inputFocused = true
+        }
+        .sheet(isPresented: Binding(get: { state.chatPreflight != nil }, set: { if !$0 { state.cancelChatPreflight() } })) {
+            if let preview = state.chatPreflight {
+                AIPreflightSheet(
+                    title: "Спросить по заметкам",
+                    explanation: "Groq получит выбранные заметки, историю этой беседы и новый вопрос.",
+                    payload: preview.payload,
+                    onCancel: { state.cancelChatPreflight() },
+                    onSend: {
+                        if state.confirmChat() { draft = "" }
+                        inputFocused = true
+                    }
+                )
+            }
+        }
+    }
+
+    private func submit() {
+        guard !draftIsBlank, state.canSendChat else { return }
+        state.prepareChat(draft)
+    }
+
+    private var allNotes: [DiaryNote] { state.sortedNotes }
+
+    private func noteTitle(_ note: DiaryNote) -> String {
+        note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Без заголовка" : note.title
+    }
+
+    /// До согласия: список заметок с отметками и кнопки «Разрешить» / «Отмена».
+    /// После: объём передачи виден прямо в чате, список можно раскрыть и снять отдельные заметки.
+    @ViewBuilder private var transferPanel: some View {
+        if allNotes.isEmpty {
+            HStack(spacing: 12) {
+                Text("Заметок нет. Спрашивать пока не о чем, отправка выключена.")
+                    .font(Theme.text).foregroundStyle(Theme.quiet)
+                Spacer()
+                Button("Создать заметку") {
+                    state.mode = .notes
+                    state.selectedNoteID = nil
+                    state.noteSearchText = ""
+                    NotificationCenter.default.post(name: .daylogNewNote, object: state)
+                }
+            }
+        } else if !state.chatConsentGiven {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Передача заметок в Groq")
+                    .font(Theme.textStrong).foregroundStyle(Theme.ink)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Пока вы не разрешите, заметки никуда не отправляются. Получатель: Groq. Уйдут только отмеченные заметки, ваш вопрос и вопросы и ответы этой беседы. При изменении набора заметок или отмене передачи беседа начинается заново. Дневник и план не отправляются. Разрешение само ничего не отправляет.")
+                    .font(Theme.caption).foregroundStyle(Theme.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
+                noteChecklist(selection: Binding(get: { pendingSelection }, set: { pendingSelection = $0 }))
+                HStack(spacing: 12) {
+                    Text(volumeText(allNotes.filter { pendingSelection.contains($0.id) }))
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
+                    Spacer()
+                    Button("Отмена") {
+                        pendingSelection = []
+                        state.revokeChatConsent()
+                    }
+                    Button("Разрешить передачу") {
+                        state.giveChatConsent(selected: pendingSelection)
+                        inputFocused = true
+                    }
+                    .disabled(pendingSelection.isEmpty || state.isBlocked)
+                    .accessibilityHint("Разрешить отправлять отмеченные заметки вместе с вопросом. Вопрос не отправится сам.")
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Text("В Groq уйдут: \(volumeText(state.chatNotesToSend))")
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button { showNoteList.toggle() } label: {
+                        Text(showNoteList ? "Скрыть список" : "Выбрать заметки").frame(minHeight: 24).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    Button {
+                        pendingSelection = state.chatSelectedNoteIDs
+                        state.revokeChatConsent()
+                        showNoteList = false
+                    } label: { Text("Отменить передачу").frame(minHeight: 24).contentShape(Rectangle()) }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Отменить передачу")
+                    .accessibilityHint("Прервать запрос, очистить беседу и запретить отправку заметок до нового разрешения")
+                }
+                if showNoteList {
+                    noteChecklist(selection: Binding(get: { state.chatSelectedNoteIDs }, set: { state.chatSelectedNoteIDs = $0 }))
+                    Text("При изменении набора заметок или отмене передачи беседа начинается заново.")
+                        .font(Theme.caption).foregroundStyle(Theme.quiet)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if state.chatNotesToSend.isEmpty {
+                    Text("Не отмечено ни одной заметки, отправка выключена.")
+                        .font(Theme.caption).foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    private func volumeText(_ notes: [DiaryNote]) -> String {
+        let chars = NotesChat.numberedNotes(notes).count
+        let over = chars > NotesChat.maxContextCharacters ? " (больше допустимых \(NotesChat.maxContextCharacters))" : ""
+        return "заметок \(notes.count) из \(allNotes.count), \(chars) знаков\(over), плюс вопрос и эта беседа"
+    }
+
+    @ViewBuilder private func noteChecklist(selection: Binding<Set<UUID>>) -> some View {
+        // Короткий список без прокрутки, длинный в ограниченной области.
+        if allNotes.count <= 5 {
+            noteChecklistRows(selection: selection)
+        } else {
+            ScrollView { noteChecklistRows(selection: selection) }.frame(maxHeight: 140)
+        }
+    }
+
+    private func noteChecklistRows(selection: Binding<Set<UUID>>) -> some View {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(allNotes) { note in
+                    Toggle(isOn: Binding(
+                        get: { selection.wrappedValue.contains(note.id) },
+                        set: { on in
+                            if on { selection.wrappedValue.insert(note.id) } else { selection.wrappedValue.remove(note.id) }
+                        })) {
+                        Text("\(noteTitle(note)) · \(note.body.count) знаков").lineLimit(1)
+                    }
+                    .toggleStyle(QuietCheckboxStyle())
+                    .frame(minHeight: 24)
+                    .disabled(state.chatBusy)
+                    .accessibilityLabel("Передавать заметку «\(noteTitle(note))»")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ChatBubble: View {
+    @EnvironmentObject var state: AppState
+    let message: ChatMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 60) }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text)
+                    .foregroundStyle(message.role == .user ? Theme.canvas : Theme.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if message.role == .assistant, !message.sourceNoteIDs.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(message.sourceNoteIDs, id: \.self) { id in
+                                if let note = state.sortedNotes.first(where: { $0.id == id }) {
+                                    Button {
+                                        state.openSource(id)
+                                    } label: {
+                                        Text(note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                             ? "Без заголовка" : note.title)
+                                            .font(Theme.caption)
+                                            .lineLimit(1)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .frame(minHeight: 24)
+                                            .background(Capsule().fill(Theme.accent.opacity(0.12)))
+                                            .contentShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(Theme.accent)
+                                    .help("Открыть заметку-источник")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(message.role == .user ? Theme.accent : Theme.field))
+            .frame(maxWidth: 560, alignment: message.role == .user ? .trailing : .leading)
+            if message.role == .assistant { Spacer(minLength: 60) }
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -933,5 +1439,196 @@ struct EntryEditor: View {
         } else {
             error = state.errorMessage
         }
+    }
+}
+
+private struct PolishConfirmSheet: View {
+    let draft: String
+    let busy: Bool
+    let onCancel: () -> Void
+    let onSend: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Причесать черновик")
+                .font(Theme.title)
+                .foregroundStyle(Theme.ink)
+            Text("В Groq отправляется только текст этого черновика; записи дневника и задачи не отправляются. Условия обработки данных определяет Groq. В дневник текст попадёт только после «Записать».")
+                .font(Theme.text)
+                .foregroundStyle(Theme.quiet)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(draft)
+                .font(Theme.input)
+                .foregroundStyle(Theme.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
+            HStack {
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(busy)
+                Button(busy ? "Отправляю…" : "Отправить", action: onSend)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+        .interactiveDismissDisabled(busy)
+    }
+}
+
+/// Проверка перед отправкой в ИИ: фактический текст, получатель, «Отправить» и «Отмена».
+/// До «Отправить» запросов нет; «Отмена» ничего не меняет.
+struct AIPreflightSheet: View {
+    let title: String
+    let explanation: String
+    let payload: String
+    let onCancel: () -> Void
+    let onSend: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(Theme.title)
+                .foregroundStyle(Theme.ink)
+                .accessibilityAddTraits(.isHeader)
+            Text("Получатель: Groq")
+                .font(Theme.textStrong)
+                .foregroundStyle(Theme.ink)
+            Text(explanation)
+                .font(Theme.text)
+                .foregroundStyle(Theme.quiet)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Будет отправлено (\(payload.count) знаков):")
+                .font(Theme.caption)
+                .foregroundStyle(Theme.quiet)
+            ScrollView {
+                Text(payload)
+                    .foregroundStyle(Theme.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(minHeight: 80, maxHeight: 280)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Текст для отправки")
+            .accessibilityValue(payload)
+            HStack {
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Отправить", action: onSend)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityHint("Отправить показанный текст в Groq")
+            }
+        }
+        .padding(24)
+        .frame(width: 500)
+    }
+}
+
+private struct DaySummarySheet: View {
+    let summary: String?
+    let busy: Bool
+    let day: Date
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Итог за \(DiaryFormat.shortDate(day))")
+                .font(Theme.title)
+                .foregroundStyle(Theme.ink)
+            if busy {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Подвожу итог дня…").foregroundStyle(Theme.quiet)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+                .accessibilityLabel("Подвожу итог дня")
+            } else if let summary {
+                Text(summary)
+                    .font(Theme.text)
+                    .foregroundStyle(Theme.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.rail))
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Text("Итог не записывается в дневник. Условия обработки данных определяет Groq.")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                if let summary, !busy {
+                    Button("Скопировать") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(summary, forType: .string)
+                    }
+                }
+                Button("Закрыть", action: onClose)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+        .interactiveDismissDisabled(busy)
+    }
+}
+
+private struct APIKeySheet: View {
+    @Binding var key: String
+    let error: String?
+    let hasSavedKey: Bool
+    let onCancel: () -> Void
+    let onSave: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Ключ Groq")
+                .font(Theme.title)
+                .foregroundStyle(Theme.ink)
+            Text("Ключ хранится в Связке ключей этого Mac и не записывается в файл дневника. Если в Связке ключей его нет, приложение берёт GROQ_API_KEY из окружения запуска.")
+                .font(Theme.text)
+                .foregroundStyle(Theme.quiet)
+                .fixedSize(horizontal: false, vertical: true)
+            if hasSavedKey {
+                Text("Ключ уже сохранён. Новый заменит его.")
+                    .font(Theme.text)
+                    .foregroundStyle(Theme.quiet)
+            }
+            SecureField("Ключ Groq", text: $key)
+                .textFieldStyle(.roundedBorder)
+            Text("Для бесплатного использования возьмите ключ из аккаунта Groq на тарифе Free. Модель: GPT-OSS 20B. Квоту и оплату определяет тариф вашего аккаунта.")
+                .font(Theme.caption)
+                .foregroundStyle(Theme.quiet)
+            Link("Создать ключ в Groq Console", destination: URL(string: "https://console.groq.com/keys")!)
+            if let error {
+                Text(error).font(Theme.text).foregroundStyle(.red)
+            }
+            HStack {
+                if hasSavedKey {
+                    Button("Удалить ключ", role: .destructive, action: onDelete)
+                }
+                Spacer()
+                Button("Отмена", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Сохранить", action: onSave)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
     }
 }

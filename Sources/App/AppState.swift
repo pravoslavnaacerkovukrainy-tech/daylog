@@ -7,11 +7,12 @@ enum FocusTarget: Hashable {
     case search
 }
 
-/// Рабочее пространство: задачи, дневник или заметки.
+/// Рабочее пространство: задачи, дневник, заметки или чат.
 enum AppMode: Hashable {
     case organizer
     case day
     case notes
+    case ask
 }
 
 /// Последнее действие, которое можно отменить кнопкой в строке состояния.
@@ -29,9 +30,54 @@ enum UndoAction: Equatable {
     }
 }
 
+/// Сетевые операции ИИ. Вызываются только после явного согласия в интерфейсе.
+/// В тестах подменяются шпионами: без ключа, без сети, без настоящих записей.
+struct AIServices {
+    var polishNote: (_ draft: String) async throws -> (title: String, body: String)
+    var summarizeDay: (_ entries: [DiaryEntry]) async throws -> String
+    var askNotes: (_ notes: [DiaryNote], _ history: [ChatMessage], _ question: String) async throws -> (answer: String, sources: [Int])
+
+    static let live = AIServices(
+        polishNote: { draft in
+            guard let key = GroqKeyStore.resolve() else { throw DraftPolishError.noKey }
+            return try await NotePolishClient().polish(draft: draft, apiKey: key)
+        },
+        summarizeDay: { entries in
+            guard let key = GroqKeyStore.resolve() else { throw DraftPolishError.noKey }
+            return try await DaySummaryClient().summarize(entries: entries, apiKey: key)
+        },
+        askNotes: { notes, history, question in
+            guard let key = GroqKeyStore.resolve() else { throw DraftPolishError.noKey }
+            return try await NotesChatClient().ask(notes: notes, history: history, question: question, apiKey: key)
+        }
+    )
+}
+
+struct ChatPreflight {
+    let notes: [DiaryNote]
+    let history: [ChatMessage]
+    let question: String
+
+    var payload: String {
+        let conversation = history.map { message in
+            let label = message.role == .user ? "Вопрос" : "Ответ Groq"
+            return "\(label): \(message.text)"
+        }
+        return (["Заметки:\n" + NotesChat.numberedNotes(notes)] + conversation + ["Новый вопрос: " + question])
+            .joined(separator: "\n\n")
+    }
+}
+
+/// Что именно уйдёт в Groq по «Оформить» у заметки. Отправляется только после «Отправить».
+struct NotePolishPreflight: Identifiable, Equatable {
+    let id = UUID()
+    let draft: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let store: DiaryStore
+    private let ai: AIServices
 
     @Published private(set) var entries: [DiaryEntry] = []
     @Published private(set) var plans: [DayPlan] = []
@@ -59,6 +105,26 @@ final class AppState: ObservableObject {
     @Published private(set) var savedOrganizerSection: String?
     @Published var mode: AppMode = .organizer
     @Published var taskCreationRequested = false
+    @Published var chatMessages: [ChatMessage] = []
+    @Published private(set) var chatBusy: Bool = false
+    @Published private(set) var chatPreflight: ChatPreflight?
+    private var chatTask: Task<Void, Never>?
+    /// Одноразовый итог текущего дня (приложение не сохраняет; живёт, пока открыт sheet).
+    @Published private(set) var daySummary: String?
+    @Published private(set) var summaryBusy: Bool = false
+    /// Записи дня, показанные перед отправкой итога. Сеть только после confirmDaySummary().
+    @Published private(set) var summaryPreflight: [DiaryEntry]?
+    private var summaryTask: Task<Void, Never>?
+    /// Показанный набросок заметки перед «Оформить». Сеть только после confirmNotePolish().
+    @Published private(set) var notePolishPreflight: NotePolishPreflight?
+    /// Явное согласие передавать выбранные заметки в Groq. Живёт до выхода из приложения.
+    @Published private(set) var chatConsentGiven = false
+    /// Заметки, которые человек оставил отмеченными для чата. Новый набор начинает новую беседу.
+    @Published var chatSelectedNoteIDs: Set<UUID> = [] {
+        didSet {
+            if oldValue != chatSelectedNoteIDs { clearChat() }
+        }
+    }
     @Published var selectedDay: Date = Calendar.current.startOfDay(for: Date())
     @Published var searchText: String = ""
     @Published var noteSearchText: String = ""
@@ -71,8 +137,9 @@ final class AppState: ObservableObject {
     @Published private(set) var focusRequest: FocusTarget?
     @Published private(set) var focusToken: Int = 0
 
-    init(store: DiaryStore = DiaryStore(directory: DiaryStore.defaultDirectory())) {
+    init(store: DiaryStore = DiaryStore(directory: DiaryStore.defaultDirectory()), ai: AIServices = .live) {
         self.store = store
+        self.ai = ai
         do {
             try store.load()
         } catch {
@@ -178,6 +245,7 @@ final class AppState: ObservableObject {
     func go(to date: Date) {
         selectedDay = Calendar.current.startOfDay(for: date)
         searchText = ""
+        clearDaySummary()
     }
 
     func goToday() { go(to: Date()) }
@@ -191,9 +259,12 @@ final class AppState: ObservableObject {
     }
 
     /// `.add` открывает дневник и ставит фокус в поле записи. `.search` ищет в текущем разделе
-    /// и режим не меняет.
+    /// и режим не меняет; в «Спросить» поля поиска нет, запрос игнорируется.
     func requestFocus(_ target: FocusTarget) {
-        if target == .add { mode = .day }
+        switch target {
+        case .add: mode = .day
+        case .search: if mode == .ask { return }
+        }
         focusRequest = target
         focusToken += 1
     }
@@ -203,6 +274,13 @@ final class AppState: ObservableObject {
         guard !isBlocked else { return }
         taskCreationRequested = true
     }
+
+    /// Меню «Причесать черновик». Само поле ввода живёт в окне и слушает этот счётчик.
+    @Published private(set) var polishRequestToken = 0
+    enum KeySheetIntent: Equatable { case settings, polish }
+    @Published var keySheetIntent: KeySheetIntent?
+
+    func requestPolish() { polishRequestToken += 1 }
 
     func showDraftStatus(_ message: String) {
         statusMessage = message
@@ -361,6 +439,173 @@ final class AppState: ObservableObject {
         } catch {
             fail(error)
         }
+    }
+
+    /// «Оформить» в редакторе заметки, шаг 1: только показать, что уйдёт в Groq. Сети нет.
+    func beginNotePolish(draft: String) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isBlocked else { return }
+        notePolishPreflight = NotePolishPreflight(draft: draft)
+    }
+
+    func cancelNotePolish() {
+        notePolishPreflight = nil
+    }
+
+    /// Шаг 2, после «Отправить»: уходит ровно показанный текст. Заметку сохраняет только человек.
+    /// Ошибка ИИ не трогает заметку: результат nil, исходный текст остаётся в редакторе.
+    func confirmNotePolish() async -> (title: String, body: String)? {
+        guard !isBlocked, let preflight = notePolishPreflight else { return nil }
+        notePolishPreflight = nil
+        do {
+            return try await ai.polishNote(preflight.draft)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            showError(error.localizedDescription)
+            return nil
+        }
+    }
+
+    // MARK: Notes chat
+
+    /// Заметки, которые уйдут с вопросом: только отмеченные и только после согласия.
+    var chatNotesToSend: [DiaryNote] {
+        _ = notes
+        guard chatConsentGiven else { return [] }
+        return store.sortedNotes().filter { chatSelectedNoteIDs.contains($0.id) }
+    }
+
+    /// Объём контекста заметок в знаках, как он уйдёт в запрос.
+    var chatContextCharacters: Int { NotesChat.numberedNotes(chatNotesToSend).count }
+
+    /// Разрешает подготовку вопроса по выбранным заметкам. Каждая отправка подтверждается отдельно.
+    func giveChatConsent(selected: Set<UUID>) {
+        let existing = Set(store.notes.map(\.id))
+        chatSelectedNoteIDs = selected.intersection(existing)
+        chatConsentGiven = true
+    }
+
+    /// Отменить передачу: идущий запрос прерывается, беседа очищается, новые запросы ждут согласия.
+    func revokeChatConsent() {
+        chatConsentGiven = false
+        chatSelectedNoteIDs = []
+        clearChat()
+    }
+
+    func setChatNote(_ id: UUID, selected: Bool) {
+        if selected { chatSelectedNoteIDs.insert(id) } else { chatSelectedNoteIDs.remove(id) }
+    }
+
+    var canSendChat: Bool { chatConsentGiven && !chatNotesToSend.isEmpty && !chatBusy && !isBlocked }
+
+    @discardableResult
+    func prepareChat(_ question: String) -> Bool {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, canSendChat else { return false }
+        let preview = ChatPreflight(notes: chatNotesToSend, history: chatMessages, question: q)
+        do {
+            _ = try NotesChat.requestBody(notes: preview.notes, history: preview.history, question: q)
+        } catch {
+            showError(error.localizedDescription)
+            return false
+        }
+        chatPreflight = preview
+        return true
+    }
+
+    func cancelChatPreflight() { chatPreflight = nil }
+
+    @discardableResult
+    func confirmChat() -> Bool {
+        guard let preview = chatPreflight else { return false }
+        chatPreflight = nil
+        guard canSendChat, preview.notes == chatNotesToSend, preview.history == chatMessages else { return false }
+        chatMessages.append(ChatMessage(role: .user, text: preview.question))
+        chatBusy = true
+        let ask = ai.askNotes
+        chatTask = Task { @MainActor in
+            do {
+                let (answer, nums) = try await ask(preview.notes, preview.history, preview.question)
+                // Задачу могли отменить (clearChat) уже после ответа - не пишем в очищенную ленту.
+                if Task.isCancelled { return }
+                let valid = NotesChat.resolveSources(nums, noteCount: preview.notes.count)
+                let ids = valid.map { preview.notes[$0 - 1].id }
+                chatMessages.append(ChatMessage(role: .assistant, text: answer, sourceNoteIDs: ids))
+            } catch is CancellationError {
+                return // отмена - молча; chatBusy сбрасывает clearChat
+            } catch {
+                if Task.isCancelled { return }
+                showError(error.localizedDescription)
+            }
+            chatBusy = false
+            chatTask = nil
+        }
+        return true
+    }
+
+    /// Прервать идущий запрос, не очищая беседу.
+    func cancelChatRequest() {
+        chatTask?.cancel()
+        chatTask = nil
+        chatBusy = false
+    }
+
+    func clearChat() {
+        cancelChatRequest()
+        cancelChatPreflight()
+        chatMessages = []
+    }
+
+    // MARK: Итог дня
+
+    /// Спокойный итог прожитого дня, шаг 1: показать записи и получателя. Сети нет.
+    /// Отправляются только записи выбранного дня; план и другие дни - нет. Ответ приложение не сохраняет.
+    func summarizeDay() {
+        guard !summaryBusy, !isBlocked else { return }
+        // Снимок записей дня: ровно он показывается и уходит после «Отправить».
+        let snapshot = dayEntries
+        guard !snapshot.isEmpty else {
+            showDraftStatus("За этот день записей нет - нечего подытоживать.")
+            return
+        }
+        daySummary = nil
+        summaryPreflight = snapshot
+    }
+
+    /// Шаг 2, после «Отправить»: уходит показанный снимок, а не текущее состояние дня.
+    func confirmDaySummary() {
+        guard !summaryBusy, !isBlocked, let snapshot = summaryPreflight else { return }
+        summaryPreflight = nil
+        summaryBusy = true
+        let summarize = ai.summarizeDay
+        summaryTask = Task { @MainActor in
+            do {
+                let text = try await summarize(snapshot)
+                if Task.isCancelled { return }
+                daySummary = text
+            } catch is CancellationError {
+                // Отмена - молча и БЕЗ сброса summaryBusy: его снимает тот, кто отменил
+                // (clearDaySummary), либо им уже владеет новый запущенный запрос.
+                return
+            } catch {
+                if Task.isCancelled { return }
+                showError(error.localizedDescription)
+            }
+            summaryBusy = false
+        }
+    }
+
+    func clearDaySummary() {
+        summaryTask?.cancel()
+        summaryBusy = false
+        summaryPreflight = nil
+        daySummary = nil
+    }
+
+    func openSource(_ id: UUID) {
+        mode = .notes
+        selectedNoteID = id
     }
 
     func performUndo() {
