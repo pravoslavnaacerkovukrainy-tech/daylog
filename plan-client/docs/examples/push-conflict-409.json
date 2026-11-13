@@ -1,0 +1,57 @@
+{
+  "ok" : true,
+  "report" : {
+    "applied" : [
+
+    ],
+    "conflicts" : [
+      "11111111-1111-4111-8111-000000000002"
+    ],
+    "gone" : [
+
+    ],
+    "rejected" : [
+
+    ],
+    "stopped" : null
+  },
+  "status" : {
+    "connection" : {
+      "state" : "online"
+    },
+    "needs_decision" : 1,
+    "offline" : false,
+    "other_servers" : [
+
+    ],
+    "pending" : [
+      {
+        "attempts" : 1,
+        "base" : {
+          "day" : "2026-11-14"
+        },
+        "changes" : {
+          "day" : "2026-11-15"
+        },
+        "conflict_fields" : [
+          "day"
+        ],
+        "message" : "На сервере изменили: Рабочий день.",
+        "server_task" : {
+          "day" : "2026-11-18",
+          "details" : null,
+          "id" : "11111111-1111-4111-8111-000000000002",
+          "is_completed" : false,
+          "is_removed" : false,
+          "text" : "Синтетика: позвонить в сервис",
+          "updated_at" : "2026-11-13T12:00:07Z"
+        },
+        "status" : "conflict",
+        "task_id" : "11111111-1111-4111-8111-000000000002",
+        "uncertain" : false
+      }
+    ],
+    "queued" : 0,
+    "server" : "http://127.0.0.1:3199"
+  }
+}

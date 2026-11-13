@@ -1,0 +1,56 @@
+{
+  "ok" : true,
+  "pending" : {
+    "attempts" : 0,
+    "base" : {
+      "day" : "2026-11-14"
+    },
+    "changes" : {
+      "day" : "2026-11-15"
+    },
+    "conflict_fields" : [
+
+    ],
+    "status" : "queued",
+    "task_id" : "11111111-1111-4111-8111-000000000002",
+    "uncertain" : false
+  },
+  "status" : {
+    "connection" : {
+      "state" : "offline_manual"
+    },
+    "needs_decision" : 0,
+    "offline" : true,
+    "other_servers" : [
+
+    ],
+    "pending" : [
+      {
+        "attempts" : 0,
+        "base" : {
+          "day" : "2026-11-14"
+        },
+        "changes" : {
+          "day" : "2026-11-15"
+        },
+        "conflict_fields" : [
+
+        ],
+        "status" : "queued",
+        "task_id" : "11111111-1111-4111-8111-000000000002",
+        "uncertain" : false
+      }
+    ],
+    "queued" : 1,
+    "server" : "http://127.0.0.1:3199"
+  },
+  "task" : {
+    "day" : "2026-11-15",
+    "details" : null,
+    "id" : "11111111-1111-4111-8111-000000000002",
+    "is_completed" : false,
+    "is_removed" : false,
+    "text" : "Синтетика: позвонить в сервис",
+    "updated_at" : "2026-11-13T12:00:02Z"
+  }
+}
