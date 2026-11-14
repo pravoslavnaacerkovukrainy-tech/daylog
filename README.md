@@ -8,6 +8,8 @@
 
 Записывайте дела, оставляйте точку продолжения и выбирайте следующее действие. Всё основное работает на Mac без сети и без ключей. По желанию можно подключить собственный ключ Groq: он нужен для черновика шагов, работы с текстом и чата по заметкам.
 
+Сайт для Windows и Linux открыт отдельно: [day.osintradar.net](https://day.osintradar.net/). Оболочка [«Хаос Дня Веб» 0.1.1](https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/tag/mac-web-v0.1.1) только показывает этот сайт и не заменяет локальный дневник.
+
 <p>
   <a href="https://github.com/pravoslavnaacerkovukrainy-tech/daylog/releases/latest">
     <img src="https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C_%D0%B4%D0%BB%D1%8F_Mac-v0.2.14-2F6690?style=for-the-badge&logo=apple&logoColor=white" alt="Скачать «Хаос Дня» 0.2.14 для Mac" />
